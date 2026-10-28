@@ -1,0 +1,100 @@
+#
+# test-download.R
+#
+# Copyright (C) 2022 by Posit Software, PBC
+#
+# Unless you have received this program directly from Posit Software pursuant
+# to the terms of a commercial license agreement with Posit Software, then
+# this program is licensed to you under the terms of version 3 of the
+# GNU Affero General Public License. This program is distributed WITHOUT
+# ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+# MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+# AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+#
+#
+
+context("download")
+
+expect_download <- function(url, destfile = NULL, method = "libcurl") {
+
+   destfile <- .rs.nullCoalesce(destfile, {
+       .rs.mapChr(seq_along(url), function(i) tempfile())
+   })
+
+   lhs <- .rs.downloadFile(
+      url      = url,
+      destfile = destfile,
+      method   = method,
+      quiet    = TRUE
+   )
+
+   rhs <- utils::download.file(
+      url      = url,
+      destfile = destfile,
+      method   = method,
+      quiet    = TRUE
+   )
+
+   expect_equal(lhs, rhs)
+
+}
+
+test_that("download.file hooks work as expected", {
+
+   url <- "https://cran.rstudio.com"
+
+   expect_download(url)
+   expect_download(c(url, url))
+
+})
+
+# https://github.com/rstudio/rstudio/issues/16446
+test_that("download hooks don't set an empty authorization header", {
+
+   # Hooks.R installs this legacy wrapper only before R 4.6.0. A newer R
+   # cannot trigger the hook, so the old trace would be an empty test.
+   skip_if(getRversion() >= "4.6.0", "legacy download hook not installed on R 4.6+")
+   skip_if(!"headers" %in% names(formals(utils::download.file)))   
+   
+   url <- "https://cran.rstudio.com"
+   
+   trace(.rs.downloadFile, quote({
+      expect_identical(headers, NULL)
+      stop("exiting early")
+   }), print = FALSE)
+   on.exit(untrace(.rs.downloadFile))
+   
+   tryCatch(
+      download.file(url, tempfile(), quiet = TRUE),
+      error = function(cnd) NULL
+   )
+   
+})
+
+test_that("we can download packages from repositories", {
+   
+   info <- download.packages(
+      pkgs    = "rlang",
+      destdir = tempdir(),
+      repos   = "https://cloud.r-project.org",
+      quiet   = TRUE
+   )
+
+   path <- info[1, 2]
+   expect_true(file.exists(path))
+   files <- untar(path, list = TRUE)
+   expect_true("rlang/DESCRIPTION" %in% files)
+
+   info <- download.packages(
+      pkgs    = "rlang",
+      destdir = tempdir(),
+      repos   = "https://packagemanager.posit.co/cran/latest",
+      quiet   = TRUE
+   )
+   
+   path <- info[1, 2]
+   expect_true(file.exists(path))
+   files <- untar(path, list = TRUE)
+   expect_true("rlang/DESCRIPTION" %in% files)
+   
+})

@@ -1,0 +1,19 @@
+RAI-Studio is a modified version of RStudio. RStudio is copyright Posit
+Software, PBC and other contributors. RAI-Studio is an independent project and
+is not affiliated with, endorsed by, or sponsored by Posit Software, PBC.
+
+RAI-Studio is licensed to you under the GNU Affero General Public License,
+version 3 (AGPLv3), the terms of which are included in the file COPYING.
+Other open source components and their licenses are listed in the file NOTICE.
+
+The source code for this build (RAI-Studio 0.1.62 Beta), including the RAI
+Assistant bridge, is available in the folder source/ of this tag:
+
+  https://github.com/NamStacks/RAI-Studio/tree/v0.1.62-beta/source
+
+RAI-Studio project and release information:
+
+  https://github.com/NamStacks/RAI-Studio/
+
+The RStudio source code that RAI-Studio is based on is published by Posit
+Software, PBC at https://github.com/rstudio/rstudio
