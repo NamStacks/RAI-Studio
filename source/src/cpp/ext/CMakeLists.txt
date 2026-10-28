@@ -1,0 +1,537 @@
+#
+# CMakeLists.txt
+#
+# Copyright (C) 2022 by Posit Software, PBC
+#
+# Unless you have received this program directly from Posit Software pursuant
+# to the terms of a commercial license agreement with Posit Software, then
+# this program is licensed to you under the terms of version 3 of the
+# GNU Affero General Public License. This program is distributed WITHOUT
+# ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+# MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+# AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+#
+#
+
+include(ExternalProject)
+include(FetchContent)
+
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+   set(CMAKE_POLICY_VERSION_MINIMUM "3.5" CACHE STRING "" FORCE)
+endif()
+
+cmake_policy(SET CMP0048 NEW)
+set(FETCHCONTENT_QUIET TRUE)
+set(CMAKE_WARN_DEPRECATED FALSE)
+
+
+#
+# Declare an external dependency.
+#
+# This function accepts the following single-value arguments:
+#
+# COMMENT:      A one-line description of the dependency, usually from the dependency itself.
+# VERSION:      The version of the dependency to be used.
+# REPOSITORY:   The (git) repository to be used when retrieving the dependency.
+# REVISION:     The (git) revision / commit hash to be used when retrieving the dependency.
+# CUSTOM:       Optional; when TRUE, the project is retrieved but not automatically added to the build.
+# PLATFORMS:    Optional; a list of platforms for which this dependency should be retrieved and built.
+#
+# This function also accepts and ignores these optional single-value arguments, which are used to render
+# the third-party license notice files (NOTICE, NOTICE-SUPPLEMENT, docs/server/licenses/index.qmd):
+#
+# DEPNAME:      The human-readable name of the dependency.
+# PATH:         Only for vendored dependencies; the path to the dependency within this repo.
+#               **Do not use in CMakeLists.txt, only in dependencies/metadata/*.txt.**
+# HOMEPAGE:     The URL to the dependency's homepage.
+# LICENSE:      An SPDX identifier for the dependency's license.
+# LICENSE_PATH: A comma-separated list of URLs or paths to the text of the dependency's license.
+#               Paths are interpreted relative to REPOSITORY or PATH.
+# AUTHOR:       The dependency's author, maintainer, or packager.
+# ATTRIBUTION:  A line of copyright attribution. If present, AUTHOR is ignored.
+#
+# Use the CUSTOM argument when you want to fetch an external dependency, but need to manually
+# set up a build target based on that package's sources. This is mainly useful for projects which
+# don't provide the requisite CMake infrastructure, or for projects which define a CMakeLists.txt
+# which we want or need to ignore.
+#
+# Files in dependencies/metadata/*.txt follow this same format but do not automatically cause
+# the dependency to be downloaded or compiled. These files are only used for rendering the third-party
+# license notice files.
+#
+function(dependency)
+
+   set(_NAME "${ARGV0}")
+   cmake_parse_arguments(PARSE_ARGV 1 "" "" "COMMENT;CUSTOM;VERSION;REPOSITORY;REVISION;CXXFLAGS;DEPNAME;HOMEPAGE;LICENSE;LICENSE_PATH;AUTHOR;ATTRIBUTION" "PLATFORMS")
+
+   set(${_NAME}_VERSION    "${_VERSION}"    CACHE INTERNAL "")
+   set(${_NAME}_REPOSITORY "${_REPOSITORY}" CACHE INTERNAL "")
+   set(${_NAME}_REVISION   "${_REVISION}"   CACHE INTERNAL "")
+   set(${_NAME}_CUSTOM     "${_CUSTOM}"     CACHE INTERNAL "")
+   set(${_NAME}_PLATFORMS  "${_PLATFORMS}"  CACHE INTERNAL "")
+   set(${_NAME}_CXXFLAGS   "${_CXXFLAGS}"   CACHE INTERNAL "")
+
+   if(_PLATFORMS)
+      foreach(_PLATFORM IN LISTS _PLATFORMS)
+         if(_PLATFORM)
+            set(${_NAME}_ENABLED TRUE)
+            break()
+         endif()
+      endforeach()
+   else()
+      set(${_NAME}_ENABLED TRUE)
+   endif()
+
+   set(${_NAME}_ENABLED ${${_NAME}_ENABLED} CACHE INTERNAL "")
+
+   string(REPLACE "." ";" _VERSION_LIST "${_VERSION}")
+   list(APPEND _VERSION_LIST 0 0 0)
+   list(GET _VERSION_LIST 0 _VERSION_MAJOR)
+   list(GET _VERSION_LIST 1 _VERSION_MINOR)
+   list(GET _VERSION_LIST 2 _VERSION_PATCH)
+
+   set(${_NAME}_VERSION_MAJOR "${_VERSION_MAJOR}" CACHE INTERNAL "")
+   set(${_NAME}_VERSION_MINOR "${_VERSION_MINOR}" CACHE INTERNAL "")
+   set(${_NAME}_VERSION_PATCH "${_VERSION_PATCH}" CACHE INTERNAL "")
+
+   set(
+      ${_NAME}_VERSION_MAJMIN
+      "${_VERSION_MAJOR}.${_VERSION_MINOR}"
+      CACHE INTERNAL "")
+
+endfunction()
+
+
+#
+# Global settings protection for FetchContent dependencies.
+#
+# Some dependencies (e.g. libgit2) set global cache variables like
+# CMAKE_C_STANDARD, BUILD_SHARED_LIBS, etc. as part of their CMakeLists.txt.
+# These leak into the parent project and can break the build.
+#
+# save_global_settings() / restore_global_settings() snapshot and restore
+# the listed variables around the fetch() call to prevent this.
+#
+set(_PROTECTED_GLOBAL_SETTINGS
+   BUILD_SHARED_LIBS
+   CMAKE_C_STANDARD
+   CMAKE_C_EXTENSIONS
+   CMAKE_CXX_STANDARD
+   CMAKE_CXX_EXTENSIONS
+)
+
+macro(save_global_settings)
+   foreach(_VAR IN LISTS _PROTECTED_GLOBAL_SETTINGS)
+      if(DEFINED CACHE{${_VAR}})
+         set(_SAVED_${_VAR} "${${_VAR}}")
+         set(_SAVED_${_VAR}_DEFINED TRUE)
+      else()
+         set(_SAVED_${_VAR}_DEFINED FALSE)
+      endif()
+   endforeach()
+endmacro()
+
+macro(restore_global_settings)
+   foreach(_VAR IN LISTS _PROTECTED_GLOBAL_SETTINGS)
+      if(_SAVED_${_VAR}_DEFINED)
+         set(${_VAR} "${_SAVED_${_VAR}}" CACHE STRING "" FORCE)
+      else()
+         unset(${_VAR} CACHE)
+      endif()
+   endforeach()
+endmacro()
+
+
+function(fetch)
+
+   set(_INDEX 0)
+   while(_INDEX LESS ${ARGC})
+
+      math(EXPR _INDEX0 "${_INDEX} + 0")
+      math(EXPR _INDEX1 "${_INDEX} + 1")
+      math(EXPR _INDEX  "${_INDEX} + 2")
+
+      list(GET ARGV ${_INDEX0} _NAME)
+      list(GET ARGV ${_INDEX1} _PREFIX)
+
+      if(${_PREFIX}_CUSTOM)
+         set(_SOURCE_SUBDIR "_ignored")
+      else()
+         set(_SOURCE_SUBDIR ".")
+      endif()
+
+      if(${_PREFIX}_ENABLED)
+         if(RSTUDIO_USE_SYSTEM_DEPENDENCIES OR RSTUDIO_USE_SYSTEM_${_PREFIX})
+            if(CMAKE_VERSION VERSION_GREATER "3.24")
+               find_package("${_NAME}" "${${_PREFIX}_VERSION}" REQUIRED GLOBAL)
+            else()
+               find_package("${_NAME}" "${${_PREFIX}_VERSION}" REQUIRED)
+            endif()
+         else()
+            set(${_PREFIX}_FETCHED TRUE)
+
+            FetchContent_Declare("${_NAME}"
+               GIT_REPOSITORY "${${_PREFIX}_REPOSITORY}"
+               GIT_TAG        "${${_PREFIX}_REVISION}"
+               GIT_SHALLOW    ON
+               SOURCE_SUBDIR  "${_SOURCE_SUBDIR}"
+               EXCLUDE_FROM_ALL)
+         endif()
+      endif()
+
+   endwhile()
+
+   set(_INDEX 0)
+   while(_INDEX LESS ${ARGC})
+
+      math(EXPR _INDEX0 "${_INDEX} + 0")
+      math(EXPR _INDEX1 "${_INDEX} + 1")
+      math(EXPR _INDEX  "${_INDEX} + 2")
+
+      list(GET ARGV ${_INDEX0} _NAME)
+      list(GET ARGV ${_INDEX1} _PREFIX)
+
+      if(${_PREFIX}_FETCHED)
+         message(STATUS "Fetching dependency ${_NAME} ${${_PREFIX}_VERSION}")
+         set(_CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+         set(CMAKE_CXX_FLAGS "${${_PREFIX}_CXXFLAGS} ${CMAKE_CXX_FLAGS}")
+         FetchContent_MakeAvailable("${_NAME}")
+         set(CMAKE_CXX_FLAGS "${_CMAKE_CXX_FLAGS}")
+         message(STATUS "Fetching dependency ${_NAME} ${${_PREFIX}_VERSION} - success")
+         set("${_PREFIX}_SOURCE_DIR" "${CMAKE_BINARY_DIR}/_deps/${_NAME}-src" CACHE INTERNAL "")
+         set("${_PREFIX}_BINARY_DIR" "${CMAKE_BINARY_DIR}/_deps/${_NAME}-build" CACHE INTERNAL "")
+      endif()
+
+   endwhile()
+
+endfunction()
+
+
+
+# dtl
+dependency(DTL
+   DEPNAME    "dtl"
+   COMMENT    "dtl provides the functions for comparing two sequences have arbitrary type."
+   VERSION    "1.21"
+   REPOSITORY "https://github.com/cubicdaiya/dtl"
+   REVISION   "32567bb9ec704f09040fb1ed7431a3d967e3df03" # pragma: allowlist secret
+   CUSTOM     TRUE
+)
+
+
+# fmt
+dependency(FMT
+   DEPNAME    "{fmt}"
+   COMMENT    "{fmt} is an open-source formatting library providing a fast and safe alternative to C stdio and C++ iostreams."
+   VERSION    "11.1.4"
+   REPOSITORY "https://github.com/fmtlib/fmt"
+   REVISION   "123913715afeb8a437e6388b4473fcc4753e1c9a" # pragma: allowlist secret
+)
+
+set(FMT_INSTALL OFF)
+
+
+# libgit2
+dependency(LIBGIT2
+   DEPNAME    "libgit2"
+   COMMENT    "libgit2 is a portable, pure C implementation of the Git core methods."
+   LICENSE    "GPL-2.0 WITH linking-exception"
+   VERSION    "1.9.2"
+   REPOSITORY "https://github.com/libgit2/libgit2"
+   REVISION   "ca225744b992bf2bf24e9a2eb357ddef78179667" # pragma: allowlist secret
+)
+
+# Snapshot global settings before libgit2 overrides, so restore_global_settings()
+# can revert to the original values (e.g. BUILD_SHARED_LIBS may be undefined).
+save_global_settings()
+
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(USE_SSH OFF CACHE BOOL "" FORCE)
+set(USE_HTTPS OFF CACHE BOOL "" FORCE)
+set(USE_ICONV OFF CACHE BOOL "" FORCE)
+set(USE_NTLMCLIENT OFF CACHE BOOL "" FORCE)
+set(USE_BUNDLED_ZLIB OFF CACHE BOOL "" FORCE)
+
+# Choose libgit2's regex backend. On Windows we use the bundled PCRE ("builtin"),
+# matching libgit2's own auto-detected default there. On Unix we use the libc
+# POSIX backend ("regcomp"), which avoids statically linking a private PCRE into
+# rsession.
+#
+# We deliberately avoid "regcomp_l": although libgit2's docs call it the default
+# "where available", its availability check (cmake/SelectRegex.cmake) compiles a
+# probe that includes <xlocale.h>. regcomp_l is a BSD/macOS extension that glibc
+# never provided, and glibc removed <xlocale.h> in 2.26, so that probe always
+# fails on Linux and libgit2 itself never auto-selects regcomp_l there -- it falls
+# through to system PCRE or "builtin". Forcing regcomp_l on glibc instead compiles
+# the dead #include <xlocale.h> in src/util/regexp.c. Plain "regcomp" is always
+# present in glibc (it is also libgit2's own fallback on iOS) and needs no header
+# that modern glibc has dropped.
+#
+# The "builtin" backend compiles a private, UTF-less copy of PCRE1 into rsession.
+# On ELF platforms that copy's symbols (pcre_compile, pcre_exec, ...) would land
+# in rsession's dynamic symbol table (rsession is linked with --export-dynamic so
+# libR.so can resolve callbacks against it) and interpose the system PCRE that an
+# R built --with-pcre1 uses, breaking any perl = TRUE regex that requests UTF mode.
+# See rstudio/rstudio#17841. Selecting regcomp on Unix sidesteps this entirely;
+# the visibility guard further below keeps "builtin" safe should it ever be used
+# on an ELF platform.
+if(WIN32)
+   set(REGEX_BACKEND "builtin" CACHE STRING "" FORCE)
+else()
+   set(REGEX_BACKEND "regcomp" CACHE STRING "" FORCE)
+endif()
+
+
+# gsl-lite
+dependency(GSL_LITE
+   DEPNAME    "gsl-lite"
+   COMMENT    "gsl-lite is an implementation of the C++ Core Guidelines Support Library originally based on Microsoft GSL."
+   VERSION    "0.42.0"
+   REPOSITORY "https://github.com/gsl-lite/gsl-lite"
+   REVISION   "21751fb0473473e27ffb1f280543885ed65447a8" # pragma: allowlist secret
+)
+
+
+# gtest and gmock
+dependency(GTEST
+   DEPNAME    "GoogleTest"
+   COMMENT    "Google Test is a C++ test framework based on the xUnit architecture."
+   VERSION    "1.17.0"
+   REPOSITORY "https://github.com/google/googletest"
+   REVISION   "52eb8108c5bdec04579160ae17225d66034bd723" # pragma: allowlist secret
+)
+
+# Disable installation of gtest/gmock - these are test dependencies only
+set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+set(INSTALL_GMOCK OFF CACHE BOOL "" FORCE)
+
+# Force gtest to use the same runtime library as the rest of the project on Windows
+if(WIN32)
+   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+endif()
+
+
+# hunspell
+dependency(HUNSPELL
+   DEPNAME    "Hunspell"
+   COMMENT    "Hunspell is a free spell checker and morphological analyzer library and command-line tool, licensed under LGPL/GPL/MPL tri-license."
+   VERSION    "1.7.2"
+   REPOSITORY "https://github.com/hunspell/hunspell"
+   REVISION   "2969be996acad84b91ab3875b1816636fe61a40e" # pragma: allowlist secret
+   CUSTOM     TRUE
+)
+
+
+# rapidjson
+dependency(RAPIDJSON
+   DEPNAME    "RapidJSON"
+   COMMENT    "A fast JSON parser/generator for C++ with both SAX/DOM style API"
+   VERSION    "1.1.0"
+   REPOSITORY "https://github.com/Tencent/rapidjson"
+   REVISION   "24b5e7a8b27f42fa16b96fc70aade9106cf7102f" # pragma: allowlist secret
+   CUSTOM     TRUE
+)
+
+
+# tl-expected
+dependency(TL_EXPECTED
+   DEPNAME    "tl::expected"
+   COMMENT    "Single header implementation of std::expected with functional-style extensions."
+   VERSION    "1.1.0"
+   REPOSITORY "https://github.com/TartanLlama/expected"
+   REVISION   "292eff8bd8ee230a7df1d6a1c00c4ea0eb2f0362" # pragma: allowlist secret
+)
+
+set(EXPECTED_BUILD_TESTS OFF)
+
+
+# utfcpp
+dependency(UTFCPP
+   DEPNAME    "UTF8-CPP"
+   COMMENT    "UTF8-CPP: UTF-8 with C++ in a Portable Way"
+   VERSION    "4.0.8"
+   REPOSITORY "https://github.com/nemtrif/utfcpp"
+   REVISION   "f9319195dfddf369f68f18e7c0039b3f351797fd" # pragma: allowlist secret
+   CUSTOM     TRUE
+)
+
+
+# websocketpp
+dependency(WEBSOCKETPP
+   DEPNAME    "WebSocket++"
+   COMMENT    "WebSocket++ is a header only C++ library that implements RFC6455 The WebSocket Protocol."
+   VERSION    "0.8.3"
+   REPOSITORY "https://github.com/amini-allight/websocketpp"
+   REVISION   "ee8cf4257e001d939839cff5b1766a835b749cd6" # pragma: allowlist secret
+   CUSTOM     TRUE
+)
+
+
+# yaml-cpp
+dependency(YAML_CPP
+   DEPNAME    "yaml-cpp"
+   COMMENT    "yaml-cpp is a YAML parser and emitter in C++ matching the YAML 1.2 spec."
+   VERSION    "0.8.0"
+   REPOSITORY "https://github.com/jbeder/yaml-cpp"
+   REVISION   "f7320141120f720aecc4c32be25586e7da9eb978" # pragma: allowlist secret
+)
+
+# help yaml-cpp 0.8.0 find <cstdint> during compilation
+if(NOT MSVC AND NOT APPLE)
+   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/yaml-cpp.h" "#include <cstdint>")
+   set(YAML_CPP_CXXFLAGS "-include ${CMAKE_CURRENT_BINARY_DIR}/yaml-cpp.h")
+endif()
+
+
+# zlib
+# CUSTOM TRUE: we manage the build target manually as 'rstudio-zlib' to avoid
+# a target name collision with the 'zlib' OBJECT target that libgit2 creates
+# from its own bundled deps/zlib when find_package(ZLIB) fails on Windows.
+dependency(ZLIB
+   DEPNAME    "zlib"
+   COMMENT    "zlib is a general purpose data compression library."
+   VERSION    "1.3.1"
+   REPOSITORY "https://github.com/madler/zlib"
+   REVISION   "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf" # pragma: allowlist secret
+   PLATFORMS  WIN32
+   CUSTOM     TRUE
+)
+
+# Ensure libgit2 resolves zlib to our top-level zlib build on Windows.
+# Without this, FindZLIB fails during libgit2 configure and it falls back
+# to its bundled deps/zlib, producing mixed zlib linkage in final binaries.
+if(WIN32 AND NOT RSTUDIO_USE_SYSTEM_DEPENDENCIES AND NOT RSTUDIO_USE_SYSTEM_ZLIB)
+   set(_RSTUDIO_ZLIB_INCLUDE_DIR "${CMAKE_BINARY_DIR}/_deps/zlib-src")
+   set(_RSTUDIO_ZLIB_LIBRARY "${CMAKE_BINARY_DIR}/src/cpp/ext/rstudio-zlib.lib")
+   set(ZLIB_INCLUDE_DIR "${_RSTUDIO_ZLIB_INCLUDE_DIR}" CACHE PATH "" FORCE)
+   set(ZLIB_INCLUDE_DIRS "${_RSTUDIO_ZLIB_INCLUDE_DIR}" CACHE STRING "" FORCE)
+   set(ZLIB_LIBRARY "${_RSTUDIO_ZLIB_LIBRARY}" CACHE FILEPATH "" FORCE)
+   set(ZLIB_LIBRARY_DEBUG "${_RSTUDIO_ZLIB_LIBRARY}" CACHE FILEPATH "" FORCE)
+   set(ZLIB_LIBRARY_RELEASE "${_RSTUDIO_ZLIB_LIBRARY}" CACHE FILEPATH "" FORCE)
+   set(ZLIB_LIBRARIES "${_RSTUDIO_ZLIB_LIBRARY}" CACHE STRING "" FORCE)
+endif()
+
+# zlib must be fetched before libgit2 so that the ZLIB cache variables point to
+# a valid library artifact when libgit2's SelectZlib.cmake calls find_package(ZLIB).
+# If zlib is not yet present, FindZLIB fails and libgit2 falls back to its bundled
+# deps/zlib, resulting in duplicate zlib symbols in the final binary.
+fetch(zlib ZLIB)
+
+# libgit2's src/libgit2/CMakeLists.txt uses FILE(WRITE) to produce git2.h in
+# the build tree.  Unlike configure_file(), FILE(WRITE) unconditionally updates
+# the timestamp even when the content is unchanged, which forces a full rebuild
+# of every libgit2 source file on every configure.  Work around this by saving
+# the old file (with its original timestamp) before the fetch and restoring it
+# afterward when the content hasn't changed.
+set(_LIBGIT2_GIT2_H "${CMAKE_BINARY_DIR}/_deps/libgit2-build/include/git2.h")
+if(EXISTS "${_LIBGIT2_GIT2_H}")
+   file(MD5 "${_LIBGIT2_GIT2_H}" _LIBGIT2_GIT2_H_MD5)
+   file(RENAME "${_LIBGIT2_GIT2_H}" "${_LIBGIT2_GIT2_H}.prev")
+endif()
+
+fetch(
+   dtl                   DTL
+   fmt                   FMT
+   gsl-lite              GSL_LITE
+   libgit2               LIBGIT2
+   gtest                 GTEST
+   hunspell              HUNSPELL
+   rapidjson             RAPIDJSON
+   tl-expected           TL_EXPECTED
+   utfcpp                UTFCPP
+   websocketpp           WEBSOCKETPP
+   yaml-cpp              YAML_CPP)
+
+if(EXISTS "${_LIBGIT2_GIT2_H}.prev")
+   if(EXISTS "${_LIBGIT2_GIT2_H}")
+      file(MD5 "${_LIBGIT2_GIT2_H}" _LIBGIT2_GIT2_H_MD5_NEW)
+      if(_LIBGIT2_GIT2_H_MD5 STREQUAL _LIBGIT2_GIT2_H_MD5_NEW)
+         file(REMOVE "${_LIBGIT2_GIT2_H}")
+         file(RENAME "${_LIBGIT2_GIT2_H}.prev" "${_LIBGIT2_GIT2_H}")
+      else()
+         file(REMOVE "${_LIBGIT2_GIT2_H}.prev")
+      endif()
+   else()
+      file(RENAME "${_LIBGIT2_GIT2_H}.prev" "${_LIBGIT2_GIT2_H}")
+   endif()
+endif()
+
+restore_global_settings()
+
+
+# Regression guard for rstudio/rstudio#17841. When libgit2 uses its "builtin"
+# REGEX_BACKEND it creates a 'pcre' OBJECT target from a private, UTF-less copy
+# of PCRE1 that gets archived into rsession. On ELF platforms those symbols
+# would otherwise be exported from rsession (which is linked --export-dynamic)
+# and interpose the system PCRE that libR.so uses. We select regcomp on Unix
+# above so this target normally does not exist there, but if "builtin" is ever
+# used on an ELF platform, compiling it with hidden visibility keeps its symbols
+# out of the dynamic symbol table while still resolving libgit2's own (static)
+# calls at link time. PCRE_EXP_DECL is a bare 'extern' with no visibility
+# attribute, so -fvisibility=hidden suffices. (No-op on Windows: MSVC ignores
+# -fvisibility, and PE/COFF does not export static-lib symbols or interpose.)
+if(TARGET pcre)
+   set_target_properties(pcre PROPERTIES C_VISIBILITY_PRESET hidden)
+endif()
+
+
+# Create dtl target.
+add_library(rstudio-dtl INTERFACE EXCLUDE_FROM_ALL)
+target_include_directories(rstudio-dtl INTERFACE "${DTL_SOURCE_DIR}")
+
+
+# Create hunspell target.
+file(GLOB HUNSPELL_HEADER_FILES "${HUNSPELL_SOURCE_DIR}/src/hunspell/*.h*")
+file(GLOB HUNSPELL_SOURCE_FILES "${HUNSPELL_SOURCE_DIR}/src/hunspell/*.c*")
+add_library(rstudio-hunspell STATIC ${HUNSPELL_SOURCE_FILES} ${HUNSPELL_HEADER_FILES})
+set_target_properties(rstudio-hunspell PROPERTIES LINKER_LANGUAGE CXX)
+target_include_directories(rstudio-hunspell SYSTEM AFTER INTERFACE "${HUNSPELL_SOURCE_DIR}/src")
+target_compile_definitions(rstudio-hunspell PUBLIC HUNSPELL_STATIC=1)
+
+if(WIN32)
+   target_include_directories(rstudio-hunspell SYSTEM AFTER PRIVATE "${HUNSPELL_PREFIX_DIR}/msvc")
+   target_compile_options(rstudio-hunspell PRIVATE /wd4244 /wd4267)
+   target_compile_options(rstudio-hunspell INTERFACE /wd4996)
+else()
+   target_compile_options(rstudio-hunspell PRIVATE -Wno-deprecated-declarations -Wno-sign-compare -Wno-unused-but-set-variable)
+endif()
+
+
+# Create rapidjson target.
+add_library(rstudio-rapidjson INTERFACE EXCLUDE_FROM_ALL)
+target_compile_definitions(rstudio-rapidjson INTERFACE "-DRAPIDJSON_NO_SIZETYPEDEFINE")
+target_include_directories(rstudio-rapidjson INTERFACE "${RAPIDJSON_SOURCE_DIR}/include")
+
+
+# Create utfcpp target.
+add_library(rstudio-utfcpp INTERFACE EXCLUDE_FROM_ALL)
+target_include_directories(rstudio-utfcpp INTERFACE "${UTFCPP_SOURCE_DIR}/source")
+
+
+# Create websocketpp target.
+add_library(rstudio-websocketpp INTERFACE EXCLUDE_FROM_ALL)
+target_include_directories(rstudio-websocketpp INTERFACE "${WEBSOCKETPP_SOURCE_DIR}")
+
+
+# Create zlib target (Windows only).
+# Uses a custom target name to avoid colliding with the 'zlib' OBJECT target
+# that libgit2 creates from its bundled deps/zlib.
+if(WIN32 AND ZLIB_ENABLED)
+   # Generate zconf.h from the template (normally done by zlib's CMakeLists.txt).
+   # The only two #cmakedefine tokens (Z_PREFIX, Z_HAVE_UNISTD_H) are both
+   # undefined on Windows, so configure_file produces the correct defaults.
+   configure_file(
+      "${ZLIB_SOURCE_DIR}/zconf.h.cmakein"
+      "${ZLIB_BINARY_DIR}/zconf.h"
+      @ONLY)
+
+   file(GLOB ZLIB_SOURCE_FILES "${ZLIB_SOURCE_DIR}/*.c")
+   file(GLOB ZLIB_HEADER_FILES "${ZLIB_SOURCE_DIR}/*.h")
+   add_library(rstudio-zlib STATIC ${ZLIB_SOURCE_FILES} ${ZLIB_HEADER_FILES})
+   # Source dir for zlib.h et al.; binary dir for the generated zconf.h.
+   target_include_directories(rstudio-zlib PUBLIC "${ZLIB_SOURCE_DIR}" "${ZLIB_BINARY_DIR}")
+endif()
+

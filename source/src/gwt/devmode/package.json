@@ -1,0 +1,17 @@
+{
+  "scripts": {
+    "daemon-start":        "deemon --detach ts-node codeserver-daemon.ts",
+    "daemon-wait":         "ts-node codeserver-wait.ts",
+    "daemon-stop":         "deemon --kill ts-node codeserver-daemon.ts",
+    "daemon-stream-start": "deemon ts-node codeserver-stream.ts",
+    "daemon-stream-stop":  "deemon --kill ts-node codeserver-stream.ts"
+  },
+  "devDependencies": {
+    "deemon": "^1.13.7"
+  },
+  "dependencies": {
+    "@types/node": "^25.6.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}

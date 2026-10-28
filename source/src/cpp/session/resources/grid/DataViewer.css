@@ -1,0 +1,1549 @@
+/*
+ * gridviewer.css
+ *
+ * Copyright (C) 2025 by Posit Software, PBC
+ *
+ * Unless you have received this program directly from Posit Software pursuant
+ * to the terms of a commercial license agreement with Posit Software, then
+ * this program is licensed to you under the terms of version 3 of the
+ * GNU Affero General Public License. This program is distributed WITHOUT
+ * ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+ * AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+ *
+ */
+
+/* ==========================================================================
+   CSS Custom Properties (themed via ThemeColorExtractor)
+   ========================================================================== */
+
+:root {
+   --grid-bg: var(--rstudio-editor-background, #ffffff);
+   --grid-fg: var(--rstudio-editor-foreground, #000000);
+   --grid-border: var(--rstudio-panel-border, #cfd4d8);
+   --grid-header-bg: var(--rstudio-editorWidget-background, #f7f8f9);
+   --grid-header-fg: var(--rstudio-editor-foreground, #555555);
+   --grid-hover-bg: var(--rstudio-list-hoverBackground, #e8e8e8);
+   --grid-selection-bg: var(--rstudio-selectionBackground, #daeffe);
+   --grid-na-color: var(--rstudio-disabledForeground, #b0b0b0);
+   --grid-focus-border: var(--rstudio-focusBorder, #4d9de0);
+
+   /* Sidebar sparkline bar colors (read from JS when painting the canvas).
+      Numeric histograms follow the theme accent; categorical frequency
+      bars use a deliberately different hue as a visual cue that the
+      x-axis is discrete values, not a numeric range; date/time histograms
+      use a third (mauve) hue so a temporal axis reads distinctly from a
+      plain numeric one. */
+   --grid-spark-numeric: var(--grid-focus-border);
+   --grid-spark-categorical: #2ba36b;
+   --grid-spark-date: #9575cd;
+
+   /* Computed mix shades -- keep these in one place so theme tweaks land
+      consistently across hover/stripe rules. */
+   --grid-row-hover-bg:  color-mix(in srgb, var(--grid-bg), var(--grid-fg) 10%);
+   --grid-row-stripe-bg: color-mix(in srgb, var(--grid-bg), var(--grid-fg) 2%);
+   --grid-row-active-bg: color-mix(in srgb, var(--grid-bg), var(--grid-fg) 5%);
+
+   --row-height: 23px;
+   --sidebar-width: 240px;
+   --info-bar-height: 25px;
+   /* Fixed height of a summary-sidebar entry. The sidebar is virtualized like
+      the grid rows (only the visible window is built), which requires every
+      entry to be the same height so an entry's vertical offset is index x this.
+      Single source of truth: DataViewer.js reads it via getComputedStyle
+      (sidebarEntryHeight). */
+   --sidebar-entry-height: 78px;
+}
+
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+
+* {
+   box-sizing: border-box;
+}
+
+html, body {
+   height: 100%;
+   margin: 0;
+   font-family: 'DejaVu Sans', 'Lucida Grande', 'Segoe UI', Verdana, Helvetica, sans-serif;
+   font-size: 11px;
+   background-color: var(--grid-bg);
+   color: var(--grid-fg);
+   overflow: hidden;
+}
+
+::selection {
+   background: var(--grid-selection-bg);
+}
+
+/* Middle-click autoscroll over the frozen pane (driven from DataViewer.js).
+   While active, show the omnidirectional cursor and a small anchor marker at
+   the click point so the interaction reads like the browser's native one. */
+body.auto-scrolling {
+   cursor: all-scroll;
+}
+.autoscroll-anchor {
+   position: fixed;
+   width: 26px;
+   height: 26px;
+   margin: -13px 0 0 -13px;              /* center on the click point */
+   border: 1px solid var(--grid-fg);
+   border-radius: 50%;
+   background-color: var(--grid-bg);
+   opacity: 0.45;
+   pointer-events: none;
+   z-index: 1000;
+}
+
+
+/* ==========================================================================
+   Layout
+   ========================================================================== */
+
+#gridContainer {
+   display: flex;
+   width: 100%;
+   height: 100%;
+   position: relative;
+}
+
+#gridPanel {
+   flex: 1;
+   display: flex;
+   flex-direction: column;
+   min-width: 0;
+   overflow: hidden;
+   position: relative;
+}
+
+/* The panes row holds the frozen pinned pane and the scrollable unpinned pane
+   side by side; it fills the vertical space above the info bar and anchors the
+   floating overlay scrollbars (position: relative). */
+#gridPanes {
+   flex: 1;
+   display: flex;
+   min-height: 0;
+   min-width: 0;
+   position: relative;
+}
+
+/* Frozen pinned columns (rownames + pinned). Fixed width set inline to the
+   pinned block width by applyPinnedColumns; never scrolls horizontally. Its
+   vertical scroll is driven programmatically to mirror #gridViewport so the
+   two panes' rows stay aligned (overflow: hidden elements are still
+   programmatically scrollable). */
+#pinnedPane {
+   flex: 0 0 auto;
+   width: 0;                             /* set inline by applyPinnedColumns */
+   /* Vertically scrollable so wheel and middle-click auto-scroll work when the
+      pointer is over the frozen pane (overflow: hidden would block both). The
+      scrollbar itself is always hidden -- the unpinned (master) pane carries
+      the only visible vertical scrollbar, and onPinnedScroll mirrors this
+      pane's scroll position onto it (and vice versa). Never scrolls
+      horizontally (its table is exactly the pane width). */
+   overflow-x: hidden;
+   overflow-y: auto;
+   scrollbar-width: none;                /* Firefox */
+   overscroll-behavior: none;
+   position: relative;
+   /* Separator between the frozen pane and the scrolling columns. */
+   border-right: 1px solid var(--grid-border);
+   contain: layout paint;
+}
+#pinnedPane::-webkit-scrollbar {
+   display: none;                        /* Chromium */
+}
+
+#gridViewport {
+   flex: 1;
+   min-width: 0;
+   overflow: auto;
+   position: relative;
+   /* Establish a paint/layout containment boundary so the frequent DOM
+      churn from virtual scrolling (spacer-height changes, row add/remove)
+      stays local to this element and does not invalidate the root layer --
+      which would otherwise force the summary sidebar (and its sparklines)
+      to repaint on every scroll frame (#17806). Filter popups are attached
+      to document.body, so they are unaffected by this clip. */
+   contain: layout paint;
+   /* Suppress the rubber-band/bounce effect at the scroll boundary; the table
+      has known dimensions, so the boundary is already obvious without it.
+      Also prevents scroll chaining out of the iframe. */
+   overscroll-behavior: none;
+}
+/* Hide native scrollbars only in overlay-scrollbar mode -- the custom
+   scrollbars are rendered as sibling divs. The body carries the
+   .overlay-scrollbars class by default; the host removes it (and these rules
+   stop applying, revealing the native scrollbars) when the
+   data_viewer_use_overlay_scrollbars preference is off. */
+body.overlay-scrollbars #gridViewport {
+   scrollbar-width: none;                /* Firefox */
+}
+body.overlay-scrollbars #gridViewport::-webkit-scrollbar {
+   display: none;                        /* Chromium */
+}
+
+
+/* ==========================================================================
+   Table
+   ========================================================================== */
+
+#rsGridData,
+#pinnedTable {
+   border-collapse: separate;
+   border-spacing: 0;
+}
+
+/* --- Header --- */
+
+thead {
+   position: sticky;
+   top: 0;
+   z-index: 10;
+}
+
+th {
+   text-align: left;
+   font-size: 11px;
+   font-weight: bold;
+   color: var(--grid-header-fg);
+   background-color: var(--grid-header-bg);
+   padding: 5px 5px;
+   border-bottom: 1px solid var(--grid-border);
+   border-right: 1px solid var(--grid-border);
+   position: relative;
+   white-space: nowrap;
+   overflow: visible;
+   user-select: none;
+}
+
+/* --- Data cells --- */
+
+td {
+   padding: 4px 5px;
+   border-bottom: 1px solid var(--grid-border);
+   border-right: 1px solid var(--grid-border);
+   font-size: 11px;
+   background-color: var(--grid-bg);
+   height: var(--row-height);
+   overflow: hidden;
+}
+
+tbody tr:hover td:not(.first-child) {
+   background-color: var(--grid-row-hover-bg);
+}
+
+/* Alternating row stripe -- keyed off a class set by the renderer from the
+   data-row index, since the virtualized tbody only holds the visible window
+   plus spacer rows and DOM position would flip the pattern as we scroll. */
+tbody tr.odd-row td:not(.first-child) {
+   background-color: var(--grid-row-stripe-bg);
+}
+
+tbody tr.odd-row:hover td:not(.first-child) {
+   background-color: var(--grid-row-hover-bg);
+}
+
+/* Virtual scroll spacer row. Diagonal stripes suggest pending/loading data.
+   NOTE: the spacer rules below tie the hover/stripe rules above on
+   specificity (0,2,3), so they must come later in the file to win the
+   source-order tiebreak -- otherwise hovering a spacer paints the row-hover
+   background behind the (transparent) striped gradient. */
+tbody tr.spacer-row td,
+tbody tr.spacer-row:hover td {
+   padding: 0;
+   border: none;
+   background:
+      repeating-linear-gradient(
+         -45deg,
+         transparent,
+         transparent 20px,
+         color-mix(in srgb, var(--grid-fg), transparent 95%) 20px,
+         color-mix(in srgb, var(--grid-fg), transparent 95%) 40px
+      );
+}
+
+/* Column-virtualization spacer cells: stand in for the horizontal space of
+   off-window columns. They must stay visually inert -- no borders, padding,
+   hover, or stripe -- so the gap they occupy reads as empty grid, and they
+   must never win the :not(.first-child) hover/stripe rules above (same
+   source-order tiebreak as the spacer row). */
+td.col-spacer,
+th.col-spacer,
+tbody tr:hover td.col-spacer,
+tbody tr.odd-row td.col-spacer {
+   padding: 0;
+   border: none;
+   background: var(--grid-bg);
+}
+
+/* Active cell / header highlight (keyboard nav + click). The grid is a
+   single tabstop on #gridViewport; one cell or header carries the
+   active-descendant outline at any time. Outline draws outside the box
+   so it doesn't shift layout, and beats the row-hover background by
+   virtue of being a separate paint phase. Scoped to :focus-within so
+   the outline disappears when focus leaves the grid (e.g. Shift+Tab
+   to the toolbar) -- otherwise it would look like keyboard focus is
+   in two places.
+
+   Note: th and the grid header's .pin-icon intentionally have no :focus /
+   :focus-visible styling of their own. Neither element is individually
+   focusable inside the grid; the only visible focus indicator there is
+   the .activeCell / .activeHeader outline below, driven by
+   aria-activedescendant. Adding per-element focus rings here would
+   re-introduce the dual-focus look this design eliminated. (The sidebar
+   reuses .pin-icon on real focusable buttons -- see .sidebar-pin-icon.) */
+#gridViewport:focus-within td.activeCell,
+#gridViewport:focus-within th.activeHeader {
+   outline: 2px solid var(--grid-focus-border);
+   outline-offset: -2px;
+}
+
+/* Suppress the browser's default focus ring on the viewport itself --
+   the active-descendant outline above is the focus indicator. */
+#gridViewport:focus {
+   outline: none;
+}
+
+
+/* ==========================================================================
+   Pinned Columns
+   ========================================================================== */
+
+/* Pinned columns (rownames + pinned) render in their own #pinnedTable inside
+   the frozen #pinnedPane -- they are ordinary, non-sticky cells there, so they
+   need no position/z-index/left of their own (the pane is what freezes them).
+   The .pinned class is retained only as a styling hook. */
+
+/* Row names column (always the first pinned column).
+   Background color comes from GridViewerStyles.getCustomStyle() which
+   injects theme-specific rules for td.first-child. */
+th.pinned:first-child,
+td.pinned:first-child {
+   text-align: right;
+   border-left: none;
+   padding-left: 9px;
+   padding-right: 9px;
+}
+
+/* --- Pin icon --- */
+
+.pin-icon {
+   display: inline-block;
+   width: 12px;
+   height: 12px;
+   margin-right: 3px;
+   vertical-align: middle;
+   cursor: pointer;
+   opacity: 0;
+   transition: opacity 0.1s;
+   /* Material Symbols "keep" icon, rotated 30deg to point down-left.
+      Uses mask-image so background-color (themeable) controls the fill. */
+   background-color: var(--grid-fg);
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 -960 960 960'%3E%3Cg transform='rotate(45 480 -480)'%3E%3Cpath d='m640-480 80 80v80H520v240l-40 40-40-40v-240H240v-80l80-80v-280h-40v-80h400v80h-40v280Zm-286 80h252l-46-46v-314H400v314l-46 46Zm126 0Z'/%3E%3C/g%3E%3C/svg%3E");
+   -webkit-mask-repeat: no-repeat;
+   -webkit-mask-size: contain;
+   -webkit-mask-position: center;
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 -960 960 960'%3E%3Cg transform='rotate(45 480 -480)'%3E%3Cpath d='m640-480 80 80v80H520v240l-40 40-40-40v-240H240v-80l80-80v-280h-40v-80h400v80h-40v280Zm-286 80h252l-46-46v-314H400v314l-46 46Zm126 0Z'/%3E%3C/g%3E%3C/svg%3E");
+   mask-repeat: no-repeat;
+   mask-size: contain;
+   mask-position: center;
+}
+
+th:hover .pin-icon {
+   opacity: 0.6;
+}
+
+.pin-icon:hover {
+   opacity: 1 !important;
+}
+
+.pin-icon.pinned {
+   opacity: 0.8;
+}
+
+.pin-icon.pinned:hover {
+   opacity: 1;
+}
+
+
+
+/* ==========================================================================
+   Cell Types
+   ========================================================================== */
+
+.numberCell {
+   text-align: right;
+}
+
+.dataCell,
+.listCell {
+   padding-right: 16px;
+   /* The viewer-link icon is absolutely positioned at right:0; anchor it
+      to the cell so short values get the icon at the cell edge instead
+      of escaping to a distant positioned ancestor. .largeCell already
+      sets position: relative for cells with long string values, but data
+      and list cells need it regardless of length. */
+   position: relative;
+}
+
+.largeCell {
+   white-space: nowrap;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   position: relative;
+}
+
+.naCell {
+   color: var(--grid-na-color);
+   font-style: italic;
+}
+
+.searchMatch {
+   background-color: var(--grid-selection-bg);
+}
+
+.viewerImage {
+   width: 12px;
+   height: 12px;
+}
+
+.viewerLink {
+   position: absolute;
+   right: 2px;
+}
+
+/* Max width for auto-sized columns */
+.autoSize .numberCell,
+.autoSize .textCell,
+.autoSize .dataCell,
+.autoSize .listCell {
+   max-width: 300px;
+}
+
+
+/* ==========================================================================
+   Header Internals
+   ========================================================================== */
+
+.headerCell {
+   white-space: nowrap;
+   text-overflow: ellipsis;
+   overflow: hidden;
+   position: relative;
+   padding-right: 18px;
+}
+
+.colLabel {
+   font-size: 10px;
+   font-weight: normal;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+   overflow: hidden;
+   margin-top: 2px;
+   max-width: 300px;
+}
+
+/* --- Column highlight flash (triggered from sidebar click) --- */
+
+@keyframes column-flash {
+   0%   { background-color: var(--grid-selection-bg); }
+   100% { background-color: var(--grid-header-bg); }
+}
+
+th.highlight-flash {
+   animation: column-flash 1s ease-out;
+}
+
+/* Sidebar entry flash on a go-to-column jump -- mirrors the header flash so
+   the summary panel tracks the jump. Fades from the selection tint back to
+   the entry's normal (transparent) background. */
+@keyframes sidebar-col-flash {
+   0%   { background-color: var(--grid-selection-bg); }
+   100% { background-color: transparent; }
+}
+
+.sidebar-col.highlight-flash {
+   animation: sidebar-col-flash 1s ease-out;
+}
+
+/* --- Sort indicators -- use mask-image so color follows the theme --- */
+
+th.sorting .headerCell::after,
+th.sorting_asc .headerCell::after,
+th.sorting_desc .headerCell::after {
+   content: '';
+   position: absolute;
+   right: 2px;
+   top: 50%;
+   transform: translateY(-50%);
+   width: 10px;
+   height: 10px;
+   opacity: 0.4;
+   background-color: var(--grid-fg);
+   -webkit-mask-repeat: no-repeat;
+   -webkit-mask-position: center;
+   -webkit-mask-size: contain;
+   mask-repeat: no-repeat;
+   mask-position: center;
+   mask-size: contain;
+}
+
+th.sorting .headerCell::after {
+   /* Both arrows (unsorted) */
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 1L8 4H2z'/%3E%3Cpath d='M5 9L2 6h6z'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 1L8 4H2z'/%3E%3Cpath d='M5 9L2 6h6z'/%3E%3C/svg%3E");
+}
+
+th.sorting_asc .headerCell::after {
+   /* Up arrow */
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 2L8 6H2z'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 2L8 6H2z'/%3E%3C/svg%3E");
+   opacity: 0.8;
+}
+
+th.sorting_desc .headerCell::after {
+   /* Down arrow */
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 8L2 4h6z'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 8L2 4h6z'/%3E%3C/svg%3E");
+   opacity: 0.8;
+}
+
+
+/* ==========================================================================
+   Column Resizer
+   ========================================================================== */
+
+.resizer {
+   position: absolute;
+   top: 0;
+   right: -3px;
+   width: 7px;
+   height: 100%;
+   cursor: ew-resize;
+   /* Above the sticky header content within its own table's stacking context
+      (thead is z-index 10) so the grip stays grabbable. Pinned and unpinned
+      columns now live in separate tables/panes, so a pinned column can no
+      longer occlude an unpinned column's resizer -- the earlier cross-column
+      z-index workaround is no longer needed. */
+   z-index: 14;
+}
+
+.resizer:hover {
+   background-color: var(--grid-focus-border);
+   opacity: 0.5;
+}
+
+/* While a column resize is in progress, lock the cursor and let mouse events
+   fall through to <body>/<document> so cursor:pointer or hover behavior on
+   elements the cursor passes over (e.g. the pin icon) cannot interrupt the
+   drag. The mousemove/mouseup listeners are bound to document and still fire
+   via bubbling. */
+body.col-resizing {
+   cursor: ew-resize !important;
+   user-select: none;
+}
+
+body.col-resizing * {
+   pointer-events: none !important;
+   cursor: ew-resize !important;
+}
+
+
+/* ==========================================================================
+   Column Type Header (data import mode)
+   ========================================================================== */
+
+.columnTypeWrapper {
+   text-align: right;
+   padding-right: 0;
+}
+
+.columnTypeHeader {
+   font-weight: normal;
+   font-style: italic;
+   margin-top: 3px;
+}
+
+th.columnClickable {
+   cursor: pointer;
+   vertical-align: bottom;
+}
+
+th.columnClickable div {
+   padding-right: 15px;
+   user-select: none;
+}
+
+.disabledColumn {
+   background-color: var(--grid-header-bg);
+}
+
+
+/* ==========================================================================
+   Filter UI
+   ========================================================================== */
+
+.colFilter,
+.numValueBox {
+   border: 1px solid var(--grid-border);
+   background-color: var(--grid-bg);
+   border-radius: 3px;
+}
+
+.colFilter {
+   margin-top: 4px;
+   white-space: nowrap;
+   padding: 2px 3px;
+   position: relative;
+   font-weight: normal;
+}
+
+.unfiltered {
+   font-style: italic;
+   color: var(--grid-na-color);
+   min-width: 35px;
+   border: 1px solid transparent;
+   margin-top: 5px;
+}
+
+.filterPopup {
+   position: absolute;
+   overflow: hidden;
+   /* Above the sidebar chrome (floating scrollbar, panel) so a popup opened
+      from a sidebar filter icon is never partly occluded by the panel. */
+   z-index: 35;
+   font-size: 11px;
+   background-color: var(--grid-bg);
+   border: 1px solid var(--grid-border);
+   box-shadow: 0 5px 5px 0 rgba(0, 0, 0, 0.25);
+}
+
+.numericFilterPopup {
+   /* Extra top padding leaves room for the clear-filter "x" in the corner. */
+   padding: 16px 4px 8px;
+}
+
+/* Apply (checkmark) and clear (x) buttons inside the numeric/date filter popup
+   -- discoverable apply/clear affordances, especially from the sidebar (which
+   has no header clear chip). The clear reuses the .clearFilter glyph; the apply
+   sits just to its left. */
+.filterPopupClear,
+.filterPopupApply {
+   position: absolute;
+   top: 3px;
+   width: 11px;
+   height: 11px;
+   cursor: pointer;
+   opacity: 0.5;
+   z-index: 1;
+}
+
+.filterPopupClear {
+   right: 3px;
+}
+
+.filterPopupApply {
+   right: 19px;
+}
+
+.filterPopupClear:hover,
+.filterPopupClear:focus-visible,
+.filterPopupApply:hover,
+.filterPopupApply:focus-visible {
+   opacity: 1;
+}
+
+.filterPopupClear::after,
+.filterPopupApply::after {
+   content: '';
+   display: block;
+   width: 11px;
+   height: 11px;
+   background-color: var(--grid-fg);
+   -webkit-mask-repeat: no-repeat;
+   mask-repeat: no-repeat;
+}
+
+.filterPopupClear::after {
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 11 11'%3E%3Cpath d='M2 2L9 9M9 2L2 9' stroke='%23000' stroke-width='1.5'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 11 11'%3E%3Cpath d='M2 2L9 9M9 2L2 9' stroke='%23000' stroke-width='1.5'/%3E%3C/svg%3E");
+}
+
+.filterPopupApply::after {
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 11 11'%3E%3Cpath d='M2 6L4.5 8.5L9 2.5' fill='none' stroke='%23000' stroke-width='1.5'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 11 11'%3E%3Cpath d='M2 6L4.5 8.5L9 2.5' fill='none' stroke='%23000' stroke-width='1.5'/%3E%3C/svg%3E");
+}
+
+.choiceList {
+   max-height: 300px;
+   max-width: 400px;
+   min-width: 50px;
+   overflow-y: auto;
+   overflow-x: hidden;
+}
+
+.choiceListItem {
+   padding: 4px 8px;
+   cursor: pointer;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+   max-width: 400px;
+}
+
+.choiceListItem:hover {
+   background-color: var(--grid-hover-bg);
+}
+
+.filterValue {
+   padding-right: 14px;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+   overflow: hidden;
+   width: 100%;
+}
+
+.textFilterBox {
+   border: none;
+   width: 100%;
+   height: 100%;
+   padding: 0;
+   background-color: var(--grid-bg);
+   color: var(--grid-fg);
+}
+
+.textFilterBox:focus {
+   outline: none;
+}
+
+/* Sidebar character filter: a padded panel around a bordered input (the inline
+   header variant stays bare -- see createTextFilterUI). */
+.textFilterPopup {
+   padding: 8px;
+}
+
+.textFilterPopup .textFilterBox {
+   width: 180px;
+   height: auto;
+   box-sizing: border-box;
+   padding: 4px 6px;
+   border: 1px solid var(--grid-border);
+   border-radius: 2px;
+}
+
+.clearFilter {
+   position: absolute;
+   top: 2px;
+   right: 2px;
+   width: 11px;
+   height: 11px;
+   cursor: pointer;
+   opacity: 0.5;
+}
+
+.clearFilter:hover {
+   opacity: 1;
+}
+
+/* Clear filter icon as an inline-SVG mask so the color follows the theme
+   foreground */
+.clearFilter::after {
+   content: '';
+   display: block;
+   width: 11px;
+   height: 11px;
+   background-color: var(--grid-fg);
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 11 11'%3E%3Cpath d='M2 2L9 9M9 2L2 9' stroke='%23000' stroke-width='1.5'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 11 11'%3E%3Cpath d='M2 2L9 9M9 2L2 9' stroke='%23000' stroke-width='1.5'/%3E%3C/svg%3E");
+   -webkit-mask-repeat: no-repeat;
+   mask-repeat: no-repeat;
+}
+
+
+/* ==========================================================================
+   Histogram (filter popup)
+   ========================================================================== */
+
+.numHist {
+   width: 130px;
+   height: 80px;
+   /* auto side margins center the fixed-width histogram within the popup,
+      which may be wider than the histogram (the value box can be wider). */
+   margin: 4px auto 10px auto;
+   padding: 10px;
+   position: relative;
+}
+
+.histBar {
+   background-color: var(--grid-focus-border);
+   opacity: 0.5;
+   cursor: pointer;
+}
+
+.selected .histBar {
+   opacity: 1;
+}
+
+.histBack {
+   cursor: pointer;
+}
+
+.histBack.selected {
+   background-color: var(--grid-row-active-bg);
+}
+
+.numValueBox {
+   margin-top: 10px;
+   border-radius: 2px;
+   margin-left: 5px;
+   margin-right: 5px;
+   /* Fill the popup width (set by the histogram) rather than a fixed 100px, so
+      a date range gets more room before it overflows the input. */
+   width: calc(100% - 10px);
+   box-sizing: border-box;
+   background-color: var(--grid-bg);
+   color: var(--grid-fg);
+}
+
+
+/* ==========================================================================
+   Info Bar
+   ========================================================================== */
+
+#rsGridData_info {
+   background-color: var(--grid-header-bg);
+   color: var(--grid-header-fg);
+   font-size: 11px;
+   padding: 5px;
+   width: 100%;
+   border-top: 1px solid var(--grid-border);
+   height: var(--info-bar-height);
+   text-align: left;
+   flex-shrink: 0;
+   box-sizing: border-box;
+}
+
+#rsGridData_info_sort {
+   float: right;
+}
+
+/* Hidden by default; shown (inline-block) while a sort is active. Uses the
+   same X icon as .clearFilter, via mask-image so the color follows the
+   theme foreground. */
+#rsGridData_info_sort_clear {
+   display: none;
+   width: 11px;
+   height: 11px;
+   margin-left: 5px;
+   padding: 0;
+   border: none;
+   vertical-align: -1px;
+   cursor: pointer;
+   opacity: 0.5;
+   background-color: var(--grid-fg);
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 11 11'%3E%3Cpath d='M2 2L9 9M9 2L2 9' stroke='%23000' stroke-width='1.5'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 11 11'%3E%3Cpath d='M2 2L9 9M9 2L2 9' stroke='%23000' stroke-width='1.5'/%3E%3C/svg%3E");
+   -webkit-mask-repeat: no-repeat;
+   -webkit-mask-position: center;
+   mask-repeat: no-repeat;
+   mask-position: center;
+}
+
+#rsGridData_info_sort_clear:hover {
+   opacity: 1;
+}
+
+#rsGridData_info_text {
+   overflow: hidden;
+}
+
+
+/* ==========================================================================
+   Sidebar
+   ========================================================================== */
+
+#sidebarPanel {
+   width: 0;
+   overflow: hidden;
+   display: flex;
+   flex-direction: column;
+   flex-shrink: 0;
+   background-color: var(--grid-bg);
+   transition: width 0.15s ease;
+   /* Anchor the absolutely-positioned floating scrollbar inside the
+      sidebar panel rather than the page. */
+   position: relative;
+}
+
+#sidebarPanel.expanded {
+   width: var(--sidebar-width);
+   /* Slightly darker than the standard --grid-border so the divider
+      between the data and the summary panel reads as a panel boundary,
+      not just an interior cell border. */
+   border-left: 1px solid color-mix(in srgb, var(--grid-border), var(--grid-fg) 30%);
+}
+
+#sidebarToggle {
+   height: 28px;
+   border-bottom: 1px solid var(--grid-border);
+   display: flex;
+   align-items: center;
+   padding: 0 8px;
+   cursor: pointer;
+   flex-shrink: 0;
+   background-color: var(--grid-header-bg);
+   font-size: 11px;
+   font-weight: bold;
+   color: var(--grid-header-fg);
+   white-space: nowrap;
+   overflow: hidden;
+}
+
+#sidebarToggle:hover {
+   background-color: var(--grid-hover-bg);
+}
+
+.sidebar-toggle-label {
+   /* min-width: 0 lets this flex child shrink below its content size when
+      the panel is narrow; without it the ellipsis can never trigger. */
+   min-width: 0;
+   overflow: hidden;
+   text-overflow: ellipsis;
+}
+
+/* "(filtered)" qualifier appended to the column count when the summaries
+   describe a filtered subset rather than the whole frame. Dimmed + italic so
+   it reads as an annotation on the count, not part of it. */
+.sidebar-toggle-filtered {
+   font-style: italic;
+   opacity: 0.7;
+}
+
+/* Help affordance; owns the auto margin that pushes it (and the close
+   glyph after it) to the right edge. A real button, unlike the decorative
+   close glyph: activating it opens the help dialog rather than collapsing
+   the panel. */
+.sidebar-toggle-help {
+   margin-left: auto;
+   width: 13px;
+   height: 12px;
+   opacity: 0.6;
+   font-size: 12px;
+   font-weight: normal;
+   text-align: center;
+   font-family: monospace;
+   cursor: pointer;
+   flex-shrink: 0;
+}
+
+.sidebar-toggle-help:hover,
+.sidebar-toggle-help:focus-visible {
+   opacity: 1;
+}
+
+/* Close affordance; purely visual (clicks bubble to #sidebarToggle, which
+   is the accessible control). */
+.sidebar-toggle-close {
+   padding-left: 8px;
+   font-size: 14px;
+   font-weight: normal;
+   line-height: 1;
+   opacity: 0.6;
+}
+
+#sidebarToggle:hover .sidebar-toggle-close {
+   opacity: 1;
+}
+
+/* ...but not while the help icon is hovered: a click there opens the help
+   dialog instead of reaching the toggle, so the close affordance should
+   not light up as if the header were about to collapse. (The close glyph
+   is a following sibling of the help icon, hence the ~ combinator.) */
+#sidebarToggle .sidebar-toggle-help:hover ~ .sidebar-toggle-close {
+   opacity: 0.6;
+}
+
+/* --- Help dialog --- */
+
+#sidebarHelpOverlay {
+   position: fixed;
+   inset: 0;
+   z-index: 100;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   background-color: rgba(0, 0, 0, 0.3);
+}
+
+.sidebar-help-dialog {
+   position: relative;
+   width: 400px;
+   max-width: calc(100vw - 40px);
+   max-height: calc(100vh - 40px);
+   overflow-y: auto;
+   padding: 12px 16px 14px;
+   background-color: var(--grid-bg);
+   color: var(--grid-fg);
+   border: 1px solid var(--grid-border);
+   border-radius: 6px;
+   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+   font-size: 12px;
+   line-height: 1.5;
+   /* The dialog takes programmatic focus on open; the dimmed backdrop is
+      indication enough, so suppress the focus ring. */
+   outline: none;
+}
+
+.sidebar-help-title {
+   font-size: 13px;
+   font-weight: bold;
+   margin-bottom: 2px;
+}
+
+.sidebar-help-close {
+   position: absolute;
+   top: 10px;
+   right: 12px;
+   font-size: 14px;
+   line-height: 1;
+   cursor: pointer;
+   opacity: 0.6;
+}
+
+.sidebar-help-close:hover,
+.sidebar-help-close:focus-visible {
+   opacity: 1;
+}
+
+.sidebar-help-section {
+   margin-top: 8px;
+}
+
+.sidebar-help-heading {
+   font-weight: bold;
+}
+
+.sidebar-help-line + .sidebar-help-line {
+   margin-top: 4px;
+}
+
+/* Legend swatches matching the sparkline bar colors. */
+.sidebar-help-swatch {
+   display: inline-block;
+   width: 9px;
+   height: 9px;
+   margin-right: 5px;
+   border-radius: 2px;
+}
+
+.sidebar-help-swatch.numeric {
+   background-color: var(--grid-spark-numeric);
+}
+
+.sidebar-help-swatch.categorical {
+   background-color: var(--grid-spark-categorical);
+}
+
+.sidebar-help-swatch.date {
+   background-color: var(--grid-spark-date);
+}
+
+#sidebarContent {
+   flex: 1;
+   overflow-y: auto;
+   overflow-x: hidden;
+   /* Paint/layout containment boundary (see #gridViewport): keeps the
+      sidebar's sparklines off the root layer so a grid scroll cannot
+      trigger their repaint (#17806). */
+   contain: layout paint;
+   /* Same rationale as #gridViewport: known content height, so suppress
+      the bounce and prevent scroll chaining. */
+   overscroll-behavior: none;
+   /* The entry list is virtualized: renderSidebarWindow replaces ALL visible
+      entries (and resizes the top spacer) on every window change. With scroll
+      anchoring enabled the browser would adjust scrollTop to compensate for
+      that wholesale content shift, which re-fires the scroll handler and
+      re-renders -- a self-sustaining scroll loop. The virtualizer manages the
+      scroll position itself via the spacers, so opt out of anchoring. */
+   overflow-anchor: none;
+}
+/* Hide native scrollbar only in overlay-scrollbar mode -- a custom floating
+   one is rendered inside #sidebarPanel by attachSidebarScrollbar. See the
+   #gridViewport rules above for how the .overlay-scrollbars class is toggled. */
+body.overlay-scrollbars #sidebarContent {
+   scrollbar-width: none;                /* Firefox */
+}
+body.overlay-scrollbars #sidebarContent::-webkit-scrollbar {
+   display: none;                        /* Chromium */
+}
+
+/* --- Column entry --- */
+
+.sidebar-col {
+   padding: 6px 8px;
+   border-bottom: 1px solid var(--grid-border);
+   cursor: pointer;
+   /* Fixed height so the virtualized sidebar can place each entry at
+      index x --sidebar-entry-height without measuring. box-sizing keeps the
+      padding inside that height; overflow stays visible so the sparkline's
+      hover tooltip can escape downward. */
+   box-sizing: border-box;
+   height: var(--sidebar-entry-height);
+}
+
+.sidebar-col:hover {
+   background-color: var(--grid-hover-bg);
+}
+
+.sidebar-col-header {
+   display: flex;
+   align-items: baseline;
+   gap: 6px;
+   margin-bottom: 2px;
+}
+
+.sidebar-col-name {
+   font-weight: bold;
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+   flex: 1;
+   min-width: 0;
+}
+
+.sidebar-col-type {
+   font-size: 10px;
+   color: var(--grid-na-color);
+   flex-shrink: 0;
+   font-family: monospace;
+}
+
+/* --- Pin / sort icons (mirroring the grid header) --- */
+
+/* The shared .pin-icon class supplies the mask glyph and the pinned-state
+   opacity, but its hover reveal is scoped to th:hover, so the .sidebar-col
+   rule below re-creates it for the sidebar entries; the rest adapts the
+   icon to the flex header row. Unlike the grid's pin icon, the sidebar
+   copies are focusable buttons, so reveal them on keyboard focus too. */
+.sidebar-pin-icon {
+   margin-right: 0;
+   flex-shrink: 0;
+   align-self: center;
+}
+
+.sidebar-col:hover .pin-icon {
+   opacity: 0.6;
+}
+
+.sidebar-pin-icon:focus-visible {
+   opacity: 0.8;
+}
+
+/* Same arrow glyphs as the th.sorting* rules, as a standalone element
+   rather than a ::after (the icon doubles as a click/keyboard target). */
+.sidebar-sort-icon {
+   width: 10px;
+   height: 10px;
+   /* Keep clear of the floating sidebar scrollbar, which overlays the
+      panel's right edge. */
+   margin-right: 4px;
+   flex-shrink: 0;
+   align-self: center;
+   cursor: pointer;
+   opacity: 0.4;
+   background-color: var(--grid-fg);
+   -webkit-mask-repeat: no-repeat;
+   -webkit-mask-position: center;
+   -webkit-mask-size: contain;
+   mask-repeat: no-repeat;
+   mask-position: center;
+   mask-size: contain;
+   /* Both arrows (unsorted) */
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 1L8 4H2z'/%3E%3Cpath d='M5 9L2 6h6z'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 1L8 4H2z'/%3E%3Cpath d='M5 9L2 6h6z'/%3E%3C/svg%3E");
+}
+
+.sidebar-sort-icon:hover,
+.sidebar-sort-icon:focus-visible {
+   opacity: 0.8;
+}
+
+.sidebar-sort-icon.sorting_asc {
+   /* Up arrow */
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 2L8 6H2z'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 2L8 6H2z'/%3E%3C/svg%3E");
+   opacity: 0.8;
+}
+
+.sidebar-sort-icon.sorting_desc {
+   /* Down arrow */
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 8L2 4h6z'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M5 8L2 4h6z'/%3E%3C/svg%3E");
+   opacity: 0.8;
+}
+
+/* Inert placeholder for non-sortable (list / data.frame) columns; keeps
+   the type labels right-aligned consistently across entries. */
+.sidebar-sort-icon.disabled {
+   visibility: hidden;
+   cursor: default;
+}
+
+/* Filter icon (funnel glyph). Always shown; faint when inactive, fully opaque
+   when the column has an active filter -- the same opacity-based active/idle
+   treatment as the pin and sort icons. Clicking it opens the column's filter
+   popup (see openColumnFilterFromSidebar). */
+.sidebar-filter-icon {
+   display: inline-block;
+   width: 10px;
+   height: 10px;
+   margin-left: 2px;
+   flex-shrink: 0;
+   align-self: center;
+   cursor: pointer;
+   opacity: 0.3;
+   background-color: var(--grid-fg);
+   -webkit-mask-repeat: no-repeat;
+   -webkit-mask-position: center;
+   -webkit-mask-size: contain;
+   mask-repeat: no-repeat;
+   mask-position: center;
+   mask-size: contain;
+   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M1 2L9 2L6 5L6 9L4 8L4 5Z'/%3E%3C/svg%3E");
+   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M1 2L9 2L6 5L6 9L4 8L4 5Z'/%3E%3C/svg%3E");
+}
+
+/* When ordering is disabled there is no sort icon, so the funnel is the last
+   element in the header row -- give it the same right margin the sort icon
+   uses to clear the floating scrollbar that overlays the panel's right edge. */
+.sidebar-filter-icon:last-child {
+   margin-right: 4px;
+}
+
+/* Brighten only on direct hover/focus of the icon itself -- not on
+   .sidebar-col:hover (that's the pin icon's reveal-on-entry-hover pattern,
+   which would light the always-visible funnel whenever the mouse is anywhere
+   over the entry). Matches the sort icon's :hover rule. */
+.sidebar-filter-icon:hover,
+.sidebar-filter-icon:focus-visible {
+   opacity: 0.6;
+}
+
+.sidebar-filter-icon.active {
+   opacity: 0.9;
+}
+
+.sidebar-filter-icon.active:hover,
+.sidebar-filter-icon.active:focus-visible {
+   opacity: 1;
+}
+
+
+/* --- Sparkline histogram --- */
+
+.sidebar-sparkline {
+   margin-top: 3px;
+   /* Always reserve the sparkline's vertical space, even for columns without a
+      histogram/category bars (or before the summary loads), so every entry is
+      the constant --sidebar-entry-height the virtualizer assumes. */
+   height: 24px;
+}
+
+.sidebar-sparkline canvas {
+   display: block;
+   width: 100%;
+   height: 24px;
+}
+
+.sparkline-wrapper {
+   position: relative;
+}
+
+.sparkline-tooltip {
+   position: absolute;
+   top: 100%;
+   left: 0;
+   margin-top: 4px;
+   padding: 4px 6px;
+   font-size: 10px;
+   line-height: 1.4;
+   background-color: var(--grid-fg);
+   color: var(--grid-bg);
+   border-radius: 3px;
+   white-space: nowrap;
+   pointer-events: none;
+   z-index: 30;
+}
+
+/* --- Column footer (summary + NA count) --- */
+
+.sidebar-col-footer {
+   display: flex;
+   justify-content: space-between;
+   align-items: baseline;
+   margin-top: 2px;
+}
+
+/* Extra 2px of breathing room between a sparkline histogram and the
+   summary row below it. Set here rather than as margin-bottom on
+   .sidebar-sparkline, which would collapse into the footer's own
+   margin-top and add nothing. */
+.sidebar-sparkline + .sidebar-col-footer {
+   margin-top: 4px;
+}
+
+.sidebar-col-summary {
+   font-size: 10px;
+   color: var(--grid-na-color);
+   /* The categorical summary can embed an arbitrary user value ("top: ...");
+      ellipsize rather than wrap or push the NA stat out of the row. */
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+   min-width: 0;
+}
+
+/* The numeric range carries actual data, so its numbers use the regular
+   foreground -- the muted summary color is hard to read in light themes. */
+.sidebar-col-summary.range {
+   color: var(--grid-fg);
+}
+
+/* The [ , ] adornments of the numeric range read as notation, not data:
+   dimming them (relative to the numbers, whose color they inherit) keeps
+   the numbers prominent and stops a locale's comma thousands separators
+   from blending into the interval's delimiter. */
+.sidebar-col-summary .range-punct {
+   opacity: 0.6;
+}
+
+.sidebar-col-na {
+   font-size: 10px;
+   color: var(--grid-na-color);
+   font-style: italic;
+   flex-shrink: 0;
+   /* Keep clear of the floating sidebar scrollbar, which overlays the
+      panel's right edge (matching .sidebar-sort-icon). */
+   margin-right: 4px;
+}
+
+/* The NA stat is always rendered for a uniform footer; dim the zero case
+   so columns with real missingness stand out when scanning the list. */
+.sidebar-col-na.zero {
+   opacity: 0.5;
+}
+
+/* --- Expand button --- */
+
+.sidebar-expand-btn {
+   display: inline-block;
+   width: 10px;
+   font-size: 10px;
+   line-height: 1;
+   cursor: pointer;
+   opacity: 0.4;
+   flex-shrink: 0;
+   text-align: center;
+   user-select: none;
+}
+
+.sidebar-expand-btn::after {
+   content: "\25B8";  /* right-pointing triangle */
+}
+
+.sidebar-expand-btn:hover {
+   opacity: 0.8;
+}
+
+.sidebar-expand-btn.expanded::after {
+   content: "\25BE";  /* down-pointing triangle */
+}
+
+.sidebar-expand-btn.expanded {
+   opacity: 0.6;
+}
+
+/* --- Stats popover --- */
+
+/* Detailed stats open in a floating popover (anchored to the entry's expand
+   button) rather than growing the entry inline -- which keeps every entry the
+   constant height the virtualized sidebar requires. Reuses the .filterPopup box
+   chrome; this just supplies the padding and a sensible minimum width. */
+.sidebar-stats-popup {
+   padding: 6px 8px;
+   min-width: 140px;
+}
+
+.sidebar-stats-table {
+   width: 100%;
+   font-size: 10px;
+   border-collapse: collapse;
+}
+
+.sidebar-stats-table td {
+   padding: 1px 0;
+   border: none;
+   /* Stay transparent so the parent .sidebar-col background (including the
+      hover highlight) shows through; otherwise the global "td" rule paints
+      an opaque --grid-bg over the stats widget. */
+   background-color: transparent;
+}
+
+.stats-label {
+   color: var(--grid-na-color);
+   padding-right: 8px;
+   white-space: nowrap;
+}
+
+.stats-value {
+   text-align: right;
+   font-family: monospace;
+   font-size: 10px;
+}
+
+.stats-empty {
+   color: var(--grid-na-color);
+   font-size: 10px;
+   font-style: italic;
+}
+
+
+/* ==========================================================================
+   Error Overlay
+   ========================================================================== */
+
+#errorMask {
+   background-color: rgba(0, 0, 0, 0.3);
+   top: 0;
+   left: 0;
+   width: 100%;
+   height: 100%;
+   z-index: 50;
+   display: none;
+   position: absolute;
+}
+
+#errorWrapper {
+   margin: 10% auto 0;
+   width: 33%;
+   text-align: center;
+   display: none;
+   padding: 30px;
+   font-size: 12px;
+   border: 2px solid var(--grid-border);
+   z-index: 100;
+   border-radius: 4px;
+   overflow: hidden;
+   background-color: var(--grid-bg);
+   position: absolute;
+   left: 29%;
+}
+
+#errorWrapper input {
+   margin-top: 30px;
+}
+
+
+/* ==========================================================================
+   Loading indicator
+   ========================================================================== */
+
+.grid-loading {
+   position: absolute;
+   top: 50%;
+   left: 50%;
+   transform: translate(-50%, -50%);
+   color: var(--grid-na-color);
+   font-size: 12px;
+   z-index: 1;
+   display: none;
+}
+
+.grid-loading.visible {
+   display: block;
+}
+
+
+/* ==========================================================================
+   Custom Scrollbars
+
+   Rendered as absolutely-positioned divs inside #gridPanes (the row holding
+   the frozen pinned pane and the scrolling unpinned pane). The vertical bar
+   starts below the sticky header; the horizontal bar starts after the pinned
+   pane and tracks the unpinned pane. Position offsets are set dynamically
+   from JS.
+   ========================================================================== */
+
+.custom-scrollbar {
+   position: absolute;
+   z-index: 20;
+   opacity: 0;
+   transition: opacity 0.2s;
+   contain: layout style;
+}
+
+.custom-scrollbar.visible {
+   opacity: 1;
+}
+
+.custom-scrollbar.vertical {
+   right: 0;
+   width: 11px;
+   /* top and height set from JS */
+}
+
+.custom-scrollbar.horizontal {
+   bottom: 0;                            /* #gridPanes sits above the info bar */
+   height: 11px;
+   /* left and width set from JS */
+}
+
+.scrollbar-track {
+   position: absolute;
+   top: 0;
+   left: 0;
+   right: 0;
+   bottom: 0;
+}
+
+.scrollbar-thumb {
+   position: absolute;
+   border-radius: 5px;
+   background-color: var(--grid-fg);
+   opacity: 0.25;
+   transition: opacity 0.15s;
+}
+
+.scrollbar-thumb:hover,
+.scrollbar-thumb.dragging {
+   opacity: 0.5;
+}
+
+.custom-scrollbar.vertical .scrollbar-thumb {
+   width: 8px;
+   right: 1px;
+   left: 1px;
+   min-height: 20px;
+   /* top and height set from JS */
+}
+
+.custom-scrollbar.horizontal .scrollbar-thumb {
+   height: 8px;
+   bottom: 1px;
+   top: 1px;
+   min-width: 20px;
+   /* left and width set from JS */
+}
+
+/* Honor user vestibular-accessibility preference: drop animations and
+   transitions instead of slow fades / spins / column-flash pulses. */
+@media (prefers-reduced-motion: reduce) {
+   *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+   }
+}

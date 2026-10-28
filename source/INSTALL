@@ -1,0 +1,221 @@
+Building RAI-Studio from Source
+=============================================================================
+
+RAI-Studio is a macOS application. The release build is a universal app that
+holds an x86_64 build and an arm64 build. Information on obtaining the source
+code is in the file SOURCE. It has only been run on Apple silicon.
+
+macOS
+-----------------------------------------------------------------------------
+
+What you need:
+
+- macOS 12 or later (the deployment target is set in
+  dependencies/tools/rstudio-tools.sh).
+- Xcode and the Xcode Command Line Tools (xcode-select --install).
+- Homebrew, plus the Homebrew packages that dependencies/osx/install-dependencies-osx
+  installs. On Apple silicon the script installs both an x86_64 and an arm64
+  set, so the x86_64 Homebrew under /usr/local and Rosetta are needed too.
+- R. The build checks the supported range in cmake/globals.cmake.
+- Node.js 22.22.2, which is the version pinned as RSTUDIO_NODE_VERSION in
+  dependencies/tools/rstudio-tools.sh. make-package stops if it finds another
+  version.
+- Java 17 and Apache Ant, for the GWT client build.
+- A checkout of the rai-chat-bridge sources with its npm dependencies installed
+  (npm ci). Set RAI_BRIDGE_SOURCE_DIR to its path. There is no default, and the
+  configure step fails if the variable is missing.
+
+To build:
+
+   cd dependencies/osx
+   ./install-dependencies-osx
+
+   cd ../../package/osx
+   RAI_PACKAGE_LIBRARY_PREFIX=<x86_64 library prefix> \
+   RAI_PACKAGE_LIBRARY_ARM64_PREFIX=<arm64 library prefix> \
+   RAI_INSTALLED_NODE_DIR=<x86_64 Node directory> \
+   RAI_NODE_ARM64_DIR=<arm64 Node directory> \
+   RAI_BRIDGE_SOURCE_DIR=<rai-chat-bridge checkout> \
+   ./make-package
+
+Set RSTUDIO_VERSION_MAJOR, RSTUDIO_VERSION_MINOR, RSTUDIO_VERSION_PATCH and
+RSTUDIO_VERSION_SUFFIX to choose the version. Run ./make-package --help for the
+other options. The wrapper accepts only --arch=x86_64,arm64. The app is written
+to package/osx/install/RAI-Studio.app.
+
+Signing, notarization, and the DMG are covered in RAI-STUDIO-RELEASE.md, which
+is in the source repository.
+
+Other platforms
+-----------------------------------------------------------------------------
+
+RAI-Studio is not built, tested, or supported on Windows, Linux, or as a
+server. The tree still contains the upstream RStudio build code for those
+targets, so the upstream instructions are kept below unchanged. Treat them as
+untested for RAI-Studio. Where they say RStudio, they describe the upstream
+project.
+
+
+1) Installing Dependencies
+----------------------------------------------------------------------------
+
+Building RStudio requires a number of dependencies (including R itself).
+There are platform-specific instructions for satisfying these dependencies
+within the following directories
+
+   dependencies
+      linux
+      osx
+      windows
+
+Please see the README file contained within the root of each platform's
+directory for specific instructions.
+
+
+2) Configuring the Build Environment
+----------------------------------------------------------------------------
+
+a) From the root of the RStudio tree create a build directory and then
+   change to it:
+
+   mkdir build
+   cd build
+
+
+b) Configure the build using cmake as appropriate, e.g.
+
+   cmake .. -DRSTUDIO_TARGET=Server -DCMAKE_BUILD_TYPE=Release
+   cmake .. -DRSTUDIO_TARGET=Electron -DRSTUDIO_PACKAGE_BUILD=1
+
+   Variables that control configuration include:
+
+   RSTUDIO_TARGET        Electron or Server
+
+   RSTUDIO_PACKAGE_BUILD Electron: must be set to 1 for following cases:
+                           "make install"
+                           "make-package"
+
+   CMAKE_BUILD_TYPE      Debug, Release, RelMinSize, or RelWithDebInfo
+
+   CMAKE_INSTALL_PREFIX  Defaults:
+                           Linux (Electron):    /usr/local/lib/rstudio
+                           Linux (Server):      /usr/local/lib/rstudio-server
+                           macOS:               /Applications/RStudio
+                           Windows:             C:\Program Files\RStudio
+
+
+c) There are additional considerations on Windows. First, RStudio Server
+   is not supported on Windows so the configuration always defaults to
+   Electron. Second, you need to add an extra -G parameter to specify the
+   correct build toolchain, for example:
+
+   cmake .. -G "Visual Studio 17 2022" -A Win64 -DCMAKE_BUILD_TYPE=Release
+
+   To build on Windows:
+
+   cmake --build . --config Release
+
+
+3) Building and Installing
+----------------------------------------------------------------------------
+
+a) Acquire administrative rights (if necessary). If you have configured
+   RStudio to be installed in a protected directory (the default on all
+   platforms) then you need to run the build/install command as an
+   administrator (e.g. "su -", "sudo sh", or running a console as an
+   Administrator on Windows)
+
+
+b) Change to the build directory where you configured RStudio
+
+
+c) Run the "make install" command:
+
+   Linux & macOS:  sudo make install        OR
+   Windows:        cmake --build . --config Release --target install
+
+   NOTE: For RStudio Electron on Linux, make install automatically creates
+   an entry in the Applications -> Programming menu for RStudio.
+
+
+d) If you are installing RStudio Server some additional configuration
+   steps are required to complete the installation. These steps are
+   detailed in the section below.
+
+
+4) RStudio Server Configuration
+----------------------------------------------------------------------------
+
+If you have installed RStudio Server from source there are a number of other
+steps (some required, some optional) you should take to complete your
+installation. Note that these steps are taken automatically by the DEB
+and RPM pre-built binary distributions of RStudio Server.
+
+a) Create an rstudio-server system user account (RStudio will automatically
+   run under this account if it is present). You can do this with:
+
+   sudo useradd -r rstudio-server
+
+
+b) RStudio Server uses PAM to authenticate users. Some Unix systems (such
+   as Debian and Ubuntu) use default PAM settings for applications which
+   aren't explicitly registered with PAM, so don't require additional PAM
+   configuration. If however your system requires explicit registration
+   (i.e. Redhat, Fedora, openSUSE) then you need to add an
+   /etc/pam.d/rstudio file to your configuration. You can find a default
+   version of this file at:
+
+   extras
+      /pam
+         rstudio
+
+
+c) Register RStudio as a daemon using an init.d (for most systems) or
+   systemd(for Ubuntu from 15.04, RHEL from 7) or upstart (for Ubuntu
+   before 15.04) or launchd plist (for Mac OSX) script appropriate to your system.
+   The rstudio/server/extras directory contains the following scripts:
+
+   extras
+      /init.d
+         /debian
+            rstudio-server
+         /redhat
+            rstudio-server
+         /suse
+            rstudio-server
+      /systemd
+            rstudio-server.redhat.service
+            rstudio-server.service
+      /upstart
+            rstudio-server.redhat.conf
+            rstudio-server.conf
+      /launchd
+            com.rstudio.launchd.rserver.plist
+
+   NOTE: installation of init.d scripts require both copying them
+   into /etc/init.d, making them executable (chmod +x), as well as
+   executing a system dependent command to ensure that the service
+   is registered with the appropriate runlevels. For example:
+
+   Debian:      sudo update-rc.d rstudio-server defaults
+   Redhat/SUSE: sudo /sbin/chkconfig --add rstudio-server
+
+
+d) Create a soft link in /usr/sbin to the server administrative script
+
+   sudo ln -f -s /usr/local/lib/rstudio-server/bin/rstudio-server /usr/sbin/rstudio-server
+
+   Assuming you have previously installed an init.d or upstart script (as
+   described above) then you should now be able start the server with the
+   following command:
+
+   sudo rstudio-server start
+
+   Additional commands include stop, restart, offline, online, and others
+
+e) Create /var directories required for RStudio to run. This can be done with:
+
+   mkdir -p /var/log/rstudio/rstudio-server
+   mkdir -p /var/lib/rstudio-server
+
+

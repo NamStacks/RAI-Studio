@@ -1,0 +1,989 @@
+/*
+ * Win32ChildProcess.cpp
+ *
+ * Copyright (C) 2022 by Posit Software, PBC
+ *
+ * Unless you have received this program directly from Posit Software pursuant
+ * to the terms of a commercial license agreement with Posit Software, then
+ * this program is licensed to you under the terms of version 3 of the
+ * GNU Affero General Public License. This program is distributed WITHOUT
+ * ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+ * AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+ *
+ */
+
+#include "ChildProcessSubprocPoll.hpp"
+#include "Win32ConPty.hpp"
+
+#include <windows.h>
+#include <Shlwapi.h>
+
+#include <boost/algorithm/string/predicate.hpp>
+
+#include <shared_core/FilePath.hpp>
+
+#include <core/StringUtils.hpp>
+#include <core/Thread.hpp>
+
+#include <core/system/ChildProcess.hpp>
+#include <core/system/System.hpp>
+#include <core/system/ShellUtils.hpp>
+
+#include "CriticalSection.hpp"
+
+namespace rstudio {
+namespace core {
+namespace system {
+
+namespace {
+
+// how long we keep "saw activity" state at true even if we haven't seen
+// new activity
+const boost::posix_time::milliseconds kResetRecentDelay =
+                                         boost::posix_time::milliseconds(1000);
+
+// how often we update "has subprocesses" flag
+const boost::posix_time::milliseconds kCheckSubprocDelay =
+                                         boost::posix_time::milliseconds(200);
+
+// how often we query and store current working directory of subprocess
+const boost::posix_time::milliseconds kCheckCwdDelay =
+                                         boost::posix_time::milliseconds(2000);
+
+std::string findOnPath(const std::string& exe,
+                       const std::string& appendExt = "")
+{
+   // make sure it has the specified extension
+   std::string resolvedExe = exe;
+   if (!appendExt.empty() &&
+       !boost::algorithm::ends_with(resolvedExe, appendExt))
+   {
+      resolvedExe += appendExt;
+   }
+
+   // do the search
+   std::vector<TCHAR> exeBuffer(MAX_PATH*4);
+   exeBuffer.insert(exeBuffer.begin(), resolvedExe.begin(), resolvedExe.end());
+   exeBuffer.push_back('\0');
+   if (::PathFindOnPath(&(exeBuffer[0]), nullptr))
+   {
+      return std::string(&(exeBuffer[0]));
+   }
+   else
+   {
+      return std::string();
+   }
+}
+
+// resolve the passed command and arguments to the form required for a
+// call to CreateProcess (do path lookup if necessary and invoke the
+// command within a command processor if it is a batch file)
+void resolveCommand(std::string* pExecutable, std::vector<std::string>* pArgs)
+{
+   // if this is a root path or it exists then leave it as is
+   if (!FilePath::isRootPath(*pExecutable) && !FilePath::exists(*pExecutable))
+   {
+      // try to find it on the path as a .exe
+      std::string exePath = findOnPath(*pExecutable, ".exe");
+      if (!exePath.empty())
+      {
+         *pExecutable = exePath;
+      }
+      else
+      {
+         // try to find it on the path as a cmd
+         std::string cmdPath = findOnPath(*pExecutable, ".cmd");
+         if (!cmdPath.empty())
+         {
+            // set the pCmd to cmd.exe
+            std::string cmdExePath = findOnPath("cmd.exe");
+            if (!cmdExePath.empty())
+            {
+               // set to cmd.exe
+               *pExecutable = cmdExePath;
+
+               // manipulate args to have cmd.exe invoke the batch file
+               pArgs->insert(pArgs->begin(), cmdPath);
+               pArgs->insert(pArgs->begin(), "/C");
+
+            }
+         }
+      }
+   }
+}
+
+Error readPipeUntilDone(HANDLE hPipe, std::string* pOutput)
+{
+   CHAR buff[4096];
+   DWORD nBytesRead;
+
+   while (true)
+   {
+      // read from pipe
+      if (::ReadFile(hPipe, buff, sizeof(buff), &nBytesRead, nullptr))
+      {
+         if (nBytesRead == 0)
+         {
+            break;
+         }
+         else
+         {
+            pOutput->append(buff, nBytesRead);
+         }
+      }
+      else
+      {
+         DWORD error = ::GetLastError();
+
+         // If an anonymous pipe is being used and the write handle has been closed,
+         // when ReadFile attempts to read using the pipe's corresponding read handle,
+         // the function returns FALSE and GetLastError returns ERROR_BROKEN_PIPE.
+         if (error == ERROR_BROKEN_PIPE)
+         {
+            break;
+         }
+
+         // If a named pipe is being read in message mode and the next message
+         // is longer than the nNumberOfBytesToRead parameter specifies,
+         // ReadFile returns FALSE and GetLastError returns ERROR_MORE_DATA.
+         // The remainder of the message can be read by a subsequent call to
+         // the ReadFile or PeekNamedPipe function.
+         else if (error == ERROR_MORE_DATA)
+         {
+            continue;
+         }
+
+         else
+         {
+            return systemError(error, ERROR_LOCATION);
+         }
+      }
+   }
+
+   return Success();
+}
+
+// Non-blocking read of whatever bytes are currently available on a pipe.
+// Used by the non-PTY path.
+Error readPipeAvailable(HANDLE hPipe, std::string* pOutput)
+{
+   DWORD dwAvail = 0;
+   if (!::PeekNamedPipe(hPipe, nullptr, 0, nullptr, &dwAvail, nullptr))
+   {
+      DWORD lastErr = ::GetLastError();
+      if (lastErr == ERROR_BROKEN_PIPE)
+         return Success();
+      return systemError(lastErr, ERROR_LOCATION);
+   }
+   if (dwAvail == 0)
+      return Success();
+
+   DWORD nBytesRead = 0;
+   std::vector<char> buffer(dwAvail, 0);
+   if (!::ReadFile(hPipe, buffer.data(), dwAvail, &nBytesRead, nullptr))
+      return LAST_SYSTEM_ERROR();
+   pOutput->append(buffer.data(), nBytesRead);
+   return Success();
+}
+
+} // anonymous namespace
+
+struct ChildProcess::Impl
+{
+   Impl()
+      : hStdInWrite(nullptr),
+        hStdOutRead(nullptr),
+        hStdErrRead(nullptr),
+        hProcess(nullptr),
+        closeStdIn_(&hStdInWrite, ERROR_LOCATION),
+        closeStdOut_(&hStdOutRead, ERROR_LOCATION),
+        closeStdErr_(&hStdErrRead, ERROR_LOCATION),
+        closeProcess_(&hProcess, ERROR_LOCATION),
+        pid(static_cast<PidType>(-1)),
+        ctrlC(0x03),
+        terminated(false)
+   {
+   }
+
+public:
+   HANDLE hStdInWrite;
+   HANDLE hStdOutRead;
+   HANDLE hStdErrRead;
+   HANDLE hProcess;
+
+private:
+   CloseHandleOnExitScope closeStdIn_;
+   CloseHandleOnExitScope closeStdOut_;
+   CloseHandleOnExitScope closeStdErr_;
+   CloseHandleOnExitScope closeProcess_;
+
+public:
+   PidType pid;
+   char ctrlC;
+   bool terminated;
+   ConPty pty;
+
+};
+
+
+ChildProcess::ChildProcess()
+  : pImpl_(new Impl())
+{
+}
+
+
+void ChildProcess::init(const std::string& exe,
+                        const std::vector<std::string>& args,
+                        const ProcessOptions& options)
+{
+   exe_ = exe;
+   args_ = args;
+   options_ = options;
+   resolveCommand(&exe_, &args_);
+
+   if (!options.stdOutFile.isEmpty() || !options.stdErrFile.isEmpty())
+   {
+      LOG_ERROR_MESSAGE(
+               "stdOutFile/stdErrFile options cannot be used with runProgram");
+   }
+}
+
+void ChildProcess::init(const std::string& command,
+                        const ProcessOptions& options)
+{
+   exe_ = findOnPath("cmd.exe");
+   args_.push_back("/S");
+   args_.push_back("/C");
+   args_.push_back("\"" + command + "\"");
+   options_ = options;
+}
+
+// initialize for an interactive terminal
+void ChildProcess::init(const ProcessOptions& options)
+{
+   options_ = options;
+   exe_ = options_.shellPath.getAbsolutePathNative();
+   args_ = options_.args;
+}
+
+ChildProcess::~ChildProcess()
+{
+}
+
+Error ChildProcess::writeToStdin(const std::string& input, bool eof)
+{
+   if (options().pseudoterminal)
+   {
+      if (!input.empty())
+      {
+         Error error = pImpl_->pty.writeInput(input);
+         if (error)
+            return error;
+      }
+      if (eof)
+         return pImpl_->pty.closeInput();
+      return Success();
+   }
+
+   // non-pseudoterminal (anonymous pipe) path -- unchanged behavior
+   if (!input.empty())
+   {
+      DWORD dwWritten;
+      BOOL bSuccess = ::WriteFile(pImpl_->hStdInWrite,
+                                  input.data(),
+                                  static_cast<DWORD>(input.length()),
+                                  &dwWritten,
+                                  nullptr);
+      if (!bSuccess)
+         return LAST_SYSTEM_ERROR();
+   }
+   if (eof)
+      return closeHandle(&pImpl_->hStdInWrite, ERROR_LOCATION);
+   return Success();
+}
+
+Error ChildProcess::ptySetSize(int cols, int rows)
+{
+   // verify we are dealing with a pseudoterminal
+   if (!options().pseudoterminal)
+      return systemError(boost::system::errc::not_supported, ERROR_LOCATION);
+
+   return pImpl_->pty.setSize(cols, rows);
+}
+
+Error ChildProcess::ptyInterrupt()
+{
+   // verify we are dealing with a pseudoterminal
+   if (!options().pseudoterminal)
+      return systemError(boost::system::errc::not_supported, ERROR_LOCATION);
+
+   return pImpl_->pty.interrupt();
+}
+
+PidType ChildProcess::getPid()
+{
+   return pImpl_->pid;
+}
+
+Error ChildProcess::terminate()
+{
+   // terminate with exit code 15 (15 is SIGTERM on posix)
+   if (!::TerminateProcess(pImpl_->hProcess, 15))
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+   else
+      return Success();
+}
+
+bool ChildProcess::hasNonIgnoredSubprocess() const
+{
+   // base class doesn't support subprocess-checking; override to implement
+   return true;
+}
+
+bool ChildProcess::hasIgnoredSubprocess() const
+{
+   // base class doesn't support subprocess-checking; override to implement
+   return false;
+}
+
+core::FilePath ChildProcess::getCwd() const
+{
+   // base class doesn't support cwd-tracking; override to implement
+   return FilePath();
+}
+
+bool ChildProcess::hasRecentOutput() const
+{
+   // base class doesn't support output activity detection; override to implement
+   return true;
+}
+
+namespace {
+
+Error openFile(const FilePath& file, bool inheritable, HANDLE* phFile)
+{
+   HANDLE hFile = ::CreateFileW(file.getAbsolutePathW().c_str(),
+                                GENERIC_WRITE,
+                                0,
+                                nullptr,
+                                CREATE_ALWAYS,
+                                FILE_ATTRIBUTE_NORMAL,
+                                nullptr);
+   if (hFile == INVALID_HANDLE_VALUE)
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+
+   if (inheritable)
+   {
+      if (!::SetHandleInformation(hFile,
+                                  HANDLE_FLAG_INHERIT,
+                                  HANDLE_FLAG_INHERIT))
+      {
+         Error err = LAST_SYSTEM_ERROR();
+         ::CloseHandle(hFile);
+         return err;
+      }
+   }
+
+   *phFile = hFile;
+
+   return Success();
+}
+
+} // namespace
+
+Error ChildProcess::run()
+{   
+   Error error;
+
+   // NOTE: if the run method is called from multiple threads in single app
+   // concurrently then a race condition can cause handles to get incorrectly
+   // directed. the workaround suggested by microsoft is to wrap the process
+   // creation code in a critical section. see this article for details:
+   //   http://support.microsoft.com/kb/315939
+   static CriticalSection s_runCriticalSection;
+   CriticalSection::Scope csScope(s_runCriticalSection);
+
+   // pseudoterminal mode: use ConPTY to emulate Posix pseudoterminal
+   if (options_.pseudoterminal)
+   {
+      error = pImpl_->pty.start(exe_, args_, options_, &pImpl_->hProcess);
+      if (!error)
+         pImpl_->pid = ::GetProcessId(pImpl_->hProcess);
+      return error;
+   }
+
+   // Standard input pipe
+   // Use 256KB buffer to prevent pipe buffer saturation under high-frequency writes
+   HANDLE hStdInRead;
+   SECURITY_ATTRIBUTES saStdIn = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+   if (!::CreatePipe(&hStdInRead, &pImpl_->hStdInWrite, &saStdIn, 256 * 1024))
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+   CloseHandleOnExitScope closeStdIn(&hStdInRead, ERROR_LOCATION);
+   if (!::SetHandleInformation(hStdInRead,
+                               HANDLE_FLAG_INHERIT,
+                               HANDLE_FLAG_INHERIT))
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+   // Ensure parent-side handle is not inheritable to prevent child processes from inheriting it
+   if (!::SetHandleInformation(pImpl_->hStdInWrite,
+                               HANDLE_FLAG_INHERIT,
+                               0))
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+
+   // Standard output pipe
+   // Use 256KB buffer to prevent backend from blocking on stdout writes
+   HANDLE hStdOutWrite;
+   SECURITY_ATTRIBUTES saStdOut = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+   if (!::CreatePipe(&pImpl_->hStdOutRead, &hStdOutWrite, &saStdOut, 256 * 1024))
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+   CloseHandleOnExitScope closeStdOut(&hStdOutWrite, ERROR_LOCATION);
+   if (!::SetHandleInformation(hStdOutWrite,
+                               HANDLE_FLAG_INHERIT,
+                               HANDLE_FLAG_INHERIT))
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+   // Ensure parent-side handle is not inheritable to prevent child processes from inheriting it
+   if (!::SetHandleInformation(pImpl_->hStdOutRead,
+                               HANDLE_FLAG_INHERIT,
+                               0))
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+
+   // Standard error pipe
+   // Use 256KB buffer to prevent backend from blocking on stderr writes
+   HANDLE hStdErrWrite;
+   SECURITY_ATTRIBUTES saStdErr = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+   if (!::CreatePipe(&pImpl_->hStdErrRead, &hStdErrWrite, &saStdErr, 256 * 1024))
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+   CloseHandleOnExitScope closeStdErr(&hStdErrWrite, ERROR_LOCATION);
+   if (!::SetHandleInformation(hStdErrWrite,
+                               HANDLE_FLAG_INHERIT,
+                               HANDLE_FLAG_INHERIT))
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+   // Ensure parent-side handle is not inheritable to prevent child processes from inheriting it
+   if (!::SetHandleInformation(pImpl_->hStdErrRead,
+                               HANDLE_FLAG_INHERIT,
+                               0))
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+
+   // populate startup info
+   STARTUPINFOW si = { sizeof(STARTUPINFOW) };
+   si.dwFlags |= STARTF_USESTDHANDLES;
+   si.hStdOutput = hStdOutWrite;
+   si.hStdError = options_.redirectStdErrToStdOut ? hStdOutWrite
+                                                  : hStdErrWrite;
+   si.hStdInput = hStdInRead;
+
+   HANDLE hStdOutWriteFile = INVALID_HANDLE_VALUE;
+   if (!options_.stdOutFile.isEmpty())
+   {
+      error = openFile(options_.stdOutFile, true, &hStdOutWriteFile);
+      if (error)
+         return error;
+      si.hStdOutput = hStdOutWriteFile;
+   }
+   CloseHandleOnExitScope closeStdOutFile(&hStdOutWriteFile, ERROR_LOCATION);
+
+   HANDLE hStdErrWriteFile = INVALID_HANDLE_VALUE;
+   if (!options_.stdErrFile.isEmpty())
+   {
+      error = openFile(options_.stdErrFile, true, &hStdErrWriteFile);
+      if (error)
+         return error;
+      si.hStdOutput = hStdErrWriteFile;
+   }
+   CloseHandleOnExitScope closeStdErrFile(&hStdErrWriteFile, ERROR_LOCATION);
+
+   // build command line
+   std::vector<WCHAR> cmdLine;
+
+   bool exeQuot =
+         std::string::npos != exe_.find(' ') &&
+         std::string::npos == exe_.find('"');
+
+   if (exeQuot)
+      cmdLine.push_back(L'"');
+   std::wstring exeWide = string_utils::utf8ToWide(exe_);
+   std::copy(exeWide.begin(), exeWide.end(), std::back_inserter(cmdLine));
+   if (exeQuot)
+      cmdLine.push_back(L'"');
+
+   for (std::string& arg : args_)
+   {
+      cmdLine.push_back(L' ');
+
+      // This is kind of gross. Ideally we would be more deterministic
+      // than this.
+      bool quot =
+            std::string::npos != arg.find(' ') &&
+            std::string::npos == arg.find('"');
+
+      if (quot)
+         cmdLine.push_back(L'"');
+      std::wstring argWide = string_utils::utf8ToWide(arg);
+      std::copy(argWide.begin(), argWide.end(), std::back_inserter(cmdLine));
+      if (quot)
+         cmdLine.push_back(L'"');
+   }
+   cmdLine.push_back(L'\0');
+
+   // specify custom environment if requested
+   DWORD dwFlags = 0;
+   LPVOID lpEnv = nullptr;
+   std::vector<wchar_t> envBlock;
+   if (options_.environment)
+   {
+      const Options& env = options_.environment.get();
+      for (const Option& envVar : env)
+      {
+         std::wstring key = string_utils::utf8ToWide(envVar.first);
+         std::wstring value = string_utils::utf8ToWide(envVar.second);
+         std::copy(key.begin(), key.end(), std::back_inserter(envBlock));
+         envBlock.push_back(L'=');
+         std::copy(value.begin(), value.end(), std::back_inserter(envBlock));
+         envBlock.push_back(L'\0');
+      }
+      envBlock.push_back(L'\0');
+
+      dwFlags |= CREATE_UNICODE_ENVIRONMENT;
+      lpEnv = &envBlock[0];
+   }
+
+   if (options_.createNewConsole)
+   {
+      dwFlags |= CREATE_NEW_CONSOLE;
+      si.dwFlags |= STARTF_USESHOWWINDOW;
+      si.wShowWindow = SW_HIDE;
+   }
+   else if (options_.detachProcess)
+   {
+      dwFlags |= DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+      si.dwFlags |= STARTF_USESHOWWINDOW;
+      si.wShowWindow = SW_HIDE;
+   }
+   else if (options_.terminateChildren)
+   {
+      dwFlags |= CREATE_NEW_PROCESS_GROUP;
+      si.dwFlags |= STARTF_USESHOWWINDOW;
+      si.wShowWindow = SW_HIDE;
+   }
+
+   if (options_.breakawayFromJob)
+      dwFlags |= CREATE_BREAKAWAY_FROM_JOB;
+
+   std::wstring workingDir;
+   if (!options_.workingDir.isEmpty())
+   {
+      workingDir = string_utils::utf8ToWide(
+            options_.workingDir.getAbsolutePathNative());
+   }
+
+   // Start the child process.
+   PROCESS_INFORMATION pi;
+   ::ZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
+   BOOL success = ::CreateProcessW(
+     exeWide.c_str(), // Process
+     &(cmdLine[0]),   // Command line
+     nullptr,         // Process handle not inheritable
+     nullptr,         // Thread handle not inheritable
+     TRUE,            // Set handle inheritance to TRUE
+     dwFlags,         // Creation flags
+     lpEnv,           // Environment block
+                      // Use parent's starting directory
+     workingDir.empty() ? nullptr : workingDir.c_str(),
+     &si,             // Pointer to STARTUPINFO structure
+     &pi);            // Pointer to PROCESS_INFORMATION structure
+
+   if (!success)
+   {
+      return LAST_SYSTEM_ERROR();
+   }
+
+   // close thread handle on exit
+   CloseHandleOnExitScope closeThread(&pi.hThread, ERROR_LOCATION);
+
+   // save handle to process
+   pImpl_->hProcess = pi.hProcess;
+   pImpl_->pid = ::GetProcessId(pImpl_->hProcess);
+
+   // success
+   return Success();
+}
+
+
+Error SyncChildProcess::readStdOut(std::string* pOutput)
+{  
+   return readPipeUntilDone(pImpl_->hStdOutRead, pOutput);
+}
+
+Error SyncChildProcess::readStdErr(std::string* pOutput)
+{
+  return readPipeUntilDone(pImpl_->hStdErrRead, pOutput);
+}
+
+Error SyncChildProcess::waitForExit(ProcessResult* pResult)
+{
+   // create threads to read stdout, stderr
+   auto readStdOutThread = core::thread::run([&]()
+   {
+      Error error = readStdOut(&(pResult->stdOut));
+      if (error)
+         LOG_ERROR(error);
+   });
+
+   auto readStdErrThread = core::thread::run([&]()
+   {
+      Error error = readStdErr(&(pResult->stdErr));
+      if (error)
+         LOG_ERROR(error);
+   });
+
+   // wait
+   DWORD result = ::WaitForSingleObject(pImpl_->hProcess, INFINITE);
+
+   // join threads
+   readStdOutThread.join();
+   readStdErrThread.join();
+
+   // check for error
+   if (result != WAIT_OBJECT_0)
+   {
+      if (result == WAIT_FAILED)
+      {
+         return LAST_SYSTEM_ERROR();
+      }
+      else
+      {
+         Error error = systemError(boost::system::errc::result_out_of_range,
+                                   ERROR_LOCATION);
+         error.addProperty("result", result);
+         return error;
+      }
+   }
+   else
+   {
+      // get exit code
+      DWORD dwStatus;
+      if (!::GetExitCodeProcess(pImpl_->hProcess, &dwStatus))
+      {
+         return LAST_SYSTEM_ERROR();
+      }
+
+      pResult->exitStatus = dwStatus;
+      return Success();
+   }
+}
+
+struct AsyncChildProcess::AsyncImpl
+{
+   AsyncImpl()
+      : calledOnStarted_(false),
+        exited_(false)
+   {
+   }
+
+   bool calledOnStarted_;
+   bool exited_;
+   boost::scoped_ptr<ChildProcessSubprocPoll> pSubprocPoll_;
+ };
+
+AsyncChildProcess::AsyncChildProcess(const std::string& exe,
+                                     const std::vector<std::string>& args,
+                                     const ProcessOptions& options)
+   : ChildProcess(), pAsyncImpl_(new AsyncImpl())
+{
+   init(exe, args, options);
+}
+
+AsyncChildProcess::AsyncChildProcess(const std::string& command,
+                                     const ProcessOptions& options)
+   : ChildProcess(), pAsyncImpl_(new AsyncImpl())
+{
+   init(command, options);
+}
+
+AsyncChildProcess::AsyncChildProcess(const ProcessOptions& options)
+      : ChildProcess(), pAsyncImpl_(new AsyncImpl())
+{
+   init(options);
+}
+
+AsyncChildProcess::~AsyncChildProcess()
+{
+}
+
+
+Error AsyncChildProcess::terminate()
+{
+   return ChildProcess::terminate();
+}
+
+bool AsyncChildProcess::hasNonIgnoredSubprocess() const
+{
+   if (pAsyncImpl_->pSubprocPoll_)
+      return pAsyncImpl_->pSubprocPoll_->hasNonIgnoredSubprocess();
+   else
+      return true;
+}
+
+bool AsyncChildProcess::hasIgnoredSubprocess() const
+{
+   if (pAsyncImpl_->pSubprocPoll_)
+      return pAsyncImpl_->pSubprocPoll_->hasIgnoredSubprocess();
+   else
+      return false;
+}
+
+core::FilePath AsyncChildProcess::getCwd() const
+{
+   if (pAsyncImpl_->pSubprocPoll_)
+      return pAsyncImpl_->pSubprocPoll_->getCwd();
+   else
+      return FilePath();
+}
+
+bool AsyncChildProcess::hasRecentOutput() const
+{
+   if (pAsyncImpl_->pSubprocPoll_)
+      return pAsyncImpl_->pSubprocPoll_->hasRecentOutput();
+   else
+      return true;
+}
+
+void AsyncChildProcess::poll()
+{
+   // skip polling if we're not on the main thread,
+   // and the process options request we run on the main thread only
+   if (enableCallbacksRequireMainThread() && options().callbacksRequireMainThread && !core::thread::isMainThread())
+      return;
+   
+   // call onStarted if we haven't yet
+   if (!(pAsyncImpl_->calledOnStarted_))
+   {
+      // setup for subprocess polling
+      pAsyncImpl_->pSubprocPoll_.reset(new ChildProcessSubprocPoll(
+         pImpl_->pid,
+         kResetRecentDelay, kCheckSubprocDelay, kCheckCwdDelay,
+         options().reportHasSubprocs ? core::system::getSubprocesses : nullptr,
+         options().ignoredSubprocs,
+         options().trackCwd ? core::system::currentWorkingDir : nullptr));
+
+      if (callbacks_.onStarted)
+         callbacks_.onStarted(*this);
+      pAsyncImpl_->calledOnStarted_ = true;
+   }
+
+   // call onContinue
+   if (callbacks_.onContinue)
+   {
+      if (!callbacks_.onContinue(*this) && !pImpl_->terminated)
+      {
+         // terminate the process
+         Error error = terminate();
+         if (error)
+            LOG_ERROR(error);
+         pImpl_->terminated = true;
+      }
+   }
+
+   bool hasRecentOutput = false;
+
+   if (options().pseudoterminal)
+   {
+      // ConPTY: single merged VT output stream
+      std::string out;
+      Error error = pImpl_->pty.readOutput(&out);
+      if (error)
+         reportError(error);
+      if (!out.empty() && callbacks_.onStdout)
+      {
+         hasRecentOutput = true;
+         callbacks_.onStdout(*this, out);
+      }
+   }
+   else
+   {
+      if (pImpl_->hStdOutRead)
+      {
+         std::string stdOut;
+         Error error = readPipeAvailable(pImpl_->hStdOutRead, &stdOut);
+         if (error)
+            reportError(error);
+         if (!stdOut.empty() && callbacks_.onStdout)
+            callbacks_.onStdout(*this, stdOut);
+      }
+      if (pImpl_->hStdErrRead)
+      {
+         std::string stdErr;
+         Error error = readPipeAvailable(pImpl_->hStdErrRead, &stdErr);
+         if (error)
+            reportError(error);
+         if (!stdErr.empty() && callbacks_.onStderr)
+         {
+            hasRecentOutput = true;
+            callbacks_.onStderr(*this, stdErr);
+         }
+      }
+   }
+
+   // check for process exit
+   DWORD result = ::WaitForSingleObject(pImpl_->hProcess, 0);
+
+   // check for process exit (or error waiting)
+   if (result != WAIT_TIMEOUT)
+   {
+      // try to get exit status
+      int exitStatus = -1;
+
+      // normal wait for process state
+      if (result == WAIT_OBJECT_0)
+      {
+         // get the exit status
+         DWORD dwStatus;
+         if (!::GetExitCodeProcess(pImpl_->hProcess, &dwStatus))
+         {
+            LOG_ERROR(LAST_SYSTEM_ERROR());
+         }
+         exitStatus = dwStatus;
+      }
+
+      // error state, return -1 and try to log a meaningful error
+      else
+      {
+         Error error;
+         if (result == WAIT_FAILED)
+         {
+            error = LAST_SYSTEM_ERROR();
+         }
+         else
+         {
+            error = systemError(boost::system::errc::result_out_of_range,
+                                ERROR_LOCATION);
+            error.addProperty("result", result);
+         }
+         LOG_ERROR(error);
+      }
+
+      if (options().pseudoterminal)
+      {
+         // This branch runs only after WaitForSingleObject(hProcess) showed the
+         // child already exited, so the only output left is what is already in the
+         // OS output pipe buffer (tens of KB) -- far below kOutHighWater. The
+         // top-of-tick steady-state read above already drained the bulk; stop()
+         // then wakes the reader to drain ConPTY's final frame (no re-pause) and
+         // joins it. So normal-exit output is not truncated. (Truncation can only
+         // occur on terminal *close* with a live, noisy child via ~ConPty -> stop,
+         // where the buffer is being discarded anyway.)
+         pImpl_->pty.stop();
+         std::string out;
+         Error error = pImpl_->pty.readOutput(&out);
+         if (error)
+            reportError(error);
+         if (!out.empty() && callbacks_.onStdout)
+         {
+            hasRecentOutput = true;
+            callbacks_.onStdout(*this, out);
+         }
+      }
+      else
+      {
+         // Drain any remaining stdout/stderr. The process has already exited
+         // (WaitForSingleObject above signaled), so its write ends of the pipes
+         // are closed and whatever it wrote is sitting in the OS pipe buffer.
+         // Read it with the non-blocking, PeekNamedPipe-based helper -- the same
+         // one the steady-state read above uses -- so no read can block.
+         //
+         // This used to spawn a thread per stream running a blocking read and
+         // bound it with timed_join(1s). That had three problems (rstudio#18022):
+         // a join timeout left the boost::thread joinable, so ~thread called
+         // std::terminate; the stdout reader wrote a shadowing local, so trailing
+         // stdout was silently dropped; and on timeout the buffers were read here
+         // while the reader thread might still be writing them. A non-blocking
+         // read on this thread avoids all three.
+         std::string stdOut, stdErr;
+
+         if (pImpl_->hStdOutRead)
+         {
+            Error error = readPipeAvailable(pImpl_->hStdOutRead, &stdOut);
+            if (error)
+               reportError(error);
+         }
+
+         if (pImpl_->hStdErrRead)
+         {
+            Error error = readPipeAvailable(pImpl_->hStdErrRead, &stdErr);
+            if (error)
+               reportError(error);
+         }
+
+         if (!stdOut.empty() && callbacks_.onStdout)
+         {
+            hasRecentOutput = true;
+            callbacks_.onStdout(*this, stdOut);
+         }
+
+         if (!stdErr.empty() && callbacks_.onStderr)
+         {
+            hasRecentOutput = true;
+            callbacks_.onStderr(*this, stdErr);
+         }
+      }
+
+      // close the process handle
+      Error error = closeHandle(&pImpl_->hProcess, ERROR_LOCATION);
+      if (error)
+         LOG_ERROR(error);
+
+      // call onExit
+      if (callbacks_.onExit)
+         callbacks_.onExit(exitStatus);
+
+      // set exited_ flag so that our exited function always
+      // returns the right value
+      pAsyncImpl_->exited_ = true;
+      pAsyncImpl_->pSubprocPoll_->stop();
+   }
+
+   // Perform optional periodic operations
+   if (pAsyncImpl_->pSubprocPoll_->poll(hasRecentOutput))
+   {
+      if (callbacks_.onHasSubprocs)
+      {
+         callbacks_.onHasSubprocs(hasNonIgnoredSubprocess(),
+                                  hasIgnoredSubprocess());
+      }
+      if (callbacks_.reportCwd)
+      {
+         callbacks_.reportCwd(getCwd());
+      }
+   }
+}
+
+bool AsyncChildProcess::exited()
+{
+   return pImpl_->hProcess == nullptr;
+}
+
+} // namespace system
+} // namespace core
+} // namespace rstudio

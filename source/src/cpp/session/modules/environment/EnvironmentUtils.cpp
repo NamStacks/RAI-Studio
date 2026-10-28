@@ -1,0 +1,344 @@
+/*
+ * EnvironmentUtils.cpp
+ *
+ * Copyright (C) 2022 by Posit Software, PBC
+ *
+ * Unless you have received this program directly from Posit Software pursuant
+ * to the terms of a commercial license agreement with Posit Software, then
+ * this program is licensed to you under the terms of version 3 of the
+ * GNU Affero General Public License. This program is distributed WITHOUT
+ * ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+ * AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+ *
+ */
+
+#include "EnvironmentUtils.hpp"
+
+#include <r/RExec.hpp>
+#include <r/RJson.hpp>
+#include <r/RVersionInfo.hpp>
+#include <core/FileSerializer.hpp>
+#include <core/FileUtils.hpp>
+#include <session/SessionModuleContext.hpp>
+
+#define MAX_ALTREP_LEN   65535   // maximum width/length for altrep inspection
+#define MAX_ALTREP_DEPTH 5       // maximum depth for altrep inspection
+
+using namespace rstudio::core;
+
+namespace rstudio {
+namespace session {
+namespace modules {
+namespace environment {
+namespace {
+
+// the string sent to the client when we're unable to get the display value
+// of a variable
+const char UNKNOWN_VALUE[] = "<unknown>";
+
+json::Value descriptionOfVar(const std::string& name, SEXP env)
+{
+   r::sexp::BindingType bt = r::sexp::getBindingType(name, env);
+
+   std::string value;
+   Error error;
+
+   if (bt == r::sexp::BindingType::Promise)
+   {
+      // getBindingIdentity returns the promise expression on all R versions
+      // (via R_DelayedBindingExpression on R >= 4.6.0, PRCODE on older R);
+      // quote it to prevent evaluation during argument passing
+      SEXP exprSEXP = r::sexp::getBindingIdentity(name, env, bt);
+      error = r::exec::RFunction(".rs.promiseExprDescription")
+         .addQuotedParam(exprSEXP)
+         .call(&value);
+   }
+   else if (bt == r::sexp::BindingType::Missing)
+   {
+      error = r::exec::RFunction(".rs.valueDescription")
+         .addParam(R_MissingArg)
+         .call(&value);
+   }
+   else if (bt == r::sexp::BindingType::ActiveBinding ||
+            bt == r::sexp::BindingType::Unbound)
+   {
+      return json::Value(UNKNOWN_VALUE);
+   }
+   else
+   {
+      // for evaluated bindings, retrieve the value via the public API
+      SEXP varSEXP = r::sexp::getBindingIdentity(name, env, bt);
+      error = r::exec::RFunction(".rs.valueDescription")
+         .addParam(varSEXP)
+         .call(&value);
+   }
+
+   if (error)
+   {
+      LOG_ERROR(error);
+      return json::Value();
+   }
+   return json::Value(value);
+}
+
+} // anonymous namespace
+
+bool isUnevaluatedPromise(const std::string& name, SEXP env)
+{
+   return r::sexp::getBindingType(name, env) == r::sexp::BindingType::Promise;
+}
+
+bool isAltrep(SEXP var)
+{
+   if (var == nullptr || var == R_NilValue)
+      return false;
+
+   return r::sexp::isAltrep(var);
+}
+
+bool hasAltrepImpl(SEXP var, std::set<SEXP>& visited, unsigned maxDepth)
+{
+   // ignore if already visited
+   if (visited.find(var) != visited.end())
+      return false;
+
+   if (r::sexp::isList(var) && maxDepth > 0)
+   {
+      // recurse if this is a list and we have recursion depth remaining; don't attempt to check
+      // every element of extremely long vectors
+      int len = std::min(r::sexp::length(var), MAX_ALTREP_LEN);
+
+      // ensure we don't visit this list again
+      visited.insert(var);
+
+      for (int i = 0; i < len; i++)
+      {
+         if (hasAltrepImpl(VECTOR_ELT(var, i), visited, maxDepth - 1))
+         {
+            return true;
+         }
+      }
+   }
+   else
+   {
+      // this isn't a list, just check the object itself
+      return isAltrep(var);
+   }
+
+   // we didn't find an ALTREP
+   return false;
+}
+
+bool hasAltrep(SEXP var)
+{
+   // recursively scan for ALTREP objects
+   std::set<SEXP> visited;
+   return hasAltrepImpl(var, visited, MAX_ALTREP_DEPTH);
+}
+
+// convert a language variable to a value. language variables are special in
+// that we can't allow them to be evaluated (doing so may e.g. trigger early
+// evaluation of a call), so instead we pass the name of the variable and a
+// reference to its environment so the lookup only happens in the context of
+// the R session.
+json::Value languageVarToJson(SEXP env, std::string objectName)
+{
+   std::string value;
+   Error error = r::exec::RFunction(".rs.languageDescription",
+               env, objectName)
+               .call(&value);
+   if (error)
+   {
+      LOG_ERROR(error);
+      return json::Value(UNKNOWN_VALUE);
+   }
+   else
+   {
+      return json::Value(value);
+   }
+}
+
+json::Value varToJson(const std::string& name, SEXP env)
+{
+   json::Object varJson;
+
+   // Classify the binding to determine how to inspect it
+   r::sexp::BindingType bt = r::sexp::getBindingType(name, env);
+
+   // only normal bindings can hold environments with nested active bindings;
+   // skip the recursive check for other types to avoid a redundant
+   // getBindingType call inside hasActiveBinding
+   bool hasActiveBinding =
+      (bt == r::sexp::BindingType::ActiveBinding) ||
+      (bt == r::sexp::BindingType::Normal && r::sexp::hasActiveBinding(name, env));
+
+   if (bt == r::sexp::BindingType::Unbound ||
+       bt == r::sexp::BindingType::Missing ||
+       bt == r::sexp::BindingType::Promise ||
+       bt == r::sexp::BindingType::ActiveBinding ||
+       hasActiveBinding)
+   {
+      varJson["name"] = name;
+      if (bt == r::sexp::BindingType::Promise)
+      {
+         varJson["type"] = std::string("promise");
+         varJson["value"] = descriptionOfVar(name, env);
+      }
+      else if (bt == r::sexp::BindingType::ActiveBinding)
+      {
+         varJson["type"] = std::string("active binding");
+         varJson["value"] = std::string("<Active binding>");
+      }
+      else if (hasActiveBinding)
+      {
+         varJson["type"] = std::string("object containing active binding");
+         varJson["value"] = std::string("<Object containing active binding>");
+      }
+      else
+      {
+         varJson["type"] = std::string("unknown");
+         varJson["value"] = (bt == r::sexp::BindingType::Missing) ?
+                                 descriptionOfVar(name, env) :
+                                 json::Value(UNKNOWN_VALUE);
+      }
+      varJson["description"] = std::string("");
+      varJson["contents"] = json::Array();
+      varJson["length"] = 0;
+      varJson["size"] = 0;
+      varJson["contents_deferred"] = false;
+   }
+
+   // For all other value types, construct the definition normally.
+   else
+   {
+      SEXP description;
+      json::Value val;
+      r::sexp::Protect protect;
+      Error error = r::exec::RFunction(".rs.describeObject")
+         .addParam(name)
+         .addParam(env)
+         .call(&description, &protect);
+      if (error)
+      {
+         LOG_ERROR(error);
+      }
+      else
+      {
+         error = r::json::jsonValueFromObject(description, &val);
+         if (error)
+            LOG_ERROR(error);
+         else
+            return val;
+      }
+   }
+
+   return varJson;
+}
+
+bool functionDiffersFromSource(
+      SEXP srcRef,
+      const std::string& functionCode)
+{
+   std::string fileName;
+   Error error = sourceFileFromRef(srcRef, &fileName);
+   if (error)
+   {
+      LOG_ERROR(error);
+      return true;
+   }
+
+   // check for ~/.active-rstudio-document -- we never want to match sources
+   // in this file, as it's used to source unsaved changes from RStudio
+   // editor buffers. don't match sources to an empty filename, either
+   // (this will resolve to the user's home directory below).
+   boost::algorithm::trim(fileName);
+   if (fileName == "~/.active-rstudio-document" ||
+       fileName.length() == 0)
+   {
+      return true;
+   }
+
+#ifdef WIN32
+   // on Windows, check for reserved device names--attempting to read from
+   // these may hang the session. source() can put things besides file names
+   // in the source file attribute (for instance, the name of a variable
+   // containing a connection).
+   if (file_utils::isWindowsReservedName(fileName))
+   {
+       return true;
+   }
+#endif
+
+   // make sure the file exists and isn't a directory
+   FilePath sourceFilePath = module_context::resolveAliasedPath(fileName);
+   if (!sourceFilePath.exists() ||
+       sourceFilePath.isDirectory())
+   {
+      return true;
+   }
+
+   // read the portion of the file pointed to by the source refs from disk
+   // the sourceref structure (including the array offsets used below)
+   // is documented here:
+   //
+   // http://journal.r-project.org/archive/2010-2/RJournal_2010-2_Murdoch.pdf
+   std::string fileContent;
+   error = readStringFromFile(
+         sourceFilePath,
+         &fileContent,
+         string_utils::LineEndingPosix,
+         INTEGER(srcRef)[0],    // the first line
+         INTEGER(srcRef)[2] + 1 // the last line
+   );
+   
+   if (error)
+   {
+      LOG_ERROR(error);
+      return true;
+   }
+
+   // ignore leading/trailing whitespace
+   std::string trimmedFunctionCode(functionCode);
+   boost::algorithm::trim(trimmedFunctionCode);
+   boost::algorithm::trim(fileContent);
+
+   return trimmedFunctionCode != fileContent;
+}
+
+// given a source reference and a JSON object, add the line and character data
+// from the source reference to the JSON object.
+void sourceRefToJson(const SEXP srcref, json::Object* pObject)
+{
+   if (srcref != nullptr && TYPEOF(srcref) == INTSXP)
+   {
+      (*pObject)["line_number"] = INTEGER(srcref)[0];
+      (*pObject)["end_line_number"] = INTEGER(srcref)[2];
+      (*pObject)["character_number"] = INTEGER(srcref)[4];
+      (*pObject)["end_character_number"] = INTEGER(srcref)[5];
+   }
+   else
+   {
+      (*pObject)["line_number"] = 0;
+      (*pObject)["end_line_number"] = 0;
+      (*pObject)["character_number"] = 0;
+      (*pObject)["end_character_number"] = 0;
+   }
+}
+
+Error sourceFileFromRef(const SEXP srcref, std::string* pFileName)
+{
+   r::sexp::Protect protect;
+   SEXP fileName;
+   Error error = r::exec::RFunction(".rs.sourceFileFromRef", srcref)
+                 .call(&fileName, &protect);
+   if (error)
+       return error;
+
+   return r::sexp::extract(fileName, pFileName, true);
+}
+
+} // namespace environment
+} // namespace modules
+} // namespace session
+} // namespace rstudio

@@ -1,0 +1,29 @@
+#!/bin/sh
+
+set -e
+
+command -v npm >/dev/null 2>&1 || { echo >&2 "npm required but not found: exiting."; exit 1; }
+
+if [ -d "./xterm.js" ]; then
+  rm -rf xterm.js
+fi
+
+mkdir xterm.js
+cd xterm.js
+npm init -y
+npm install --legacy-peer-deps @xterm/xterm@6.0.0
+npm install --legacy-peer-deps @xterm/addon-fit@0.11.0
+npm install --legacy-peer-deps @xterm/addon-web-links@0.12.0
+npm install --legacy-peer-deps @xterm/addon-webgl@0.19.0
+
+XTERM_TARGET_DIR=../../src/org/rstudio/studio/client/workbench/views/terminal/xterm
+
+cp ./node_modules/@xterm/xterm/css/xterm.css ${XTERM_TARGET_DIR}/xterm.css
+
+# Strip source-map references since they don't work via ClientBundle
+sed '/^\/\/# sourceMappingURL=/d' ./node_modules/@xterm/xterm/lib/xterm.js > ${XTERM_TARGET_DIR}/xterm.js
+sed '/^\/\/# sourceMappingURL=/d' ./node_modules/@xterm/addon-fit/lib/addon-fit.js > ${XTERM_TARGET_DIR}/fit.js
+sed '/^\/\/# sourceMappingURL=/d' ./node_modules/@xterm/addon-web-links/lib/addon-web-links.js > ${XTERM_TARGET_DIR}/web-links.js
+sed '/^\/\/# sourceMappingURL=/d' ./node_modules/@xterm/addon-webgl/lib/addon-webgl.js > ${XTERM_TARGET_DIR}/webgl.js
+
+echo Done!
