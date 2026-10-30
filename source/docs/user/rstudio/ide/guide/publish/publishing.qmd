@@ -1,0 +1,99 @@
+---
+title: "Publishing"
+date-meta: 2025-04-09
+---
+
+The following documentation is an overview of "Push-button Deployment" in RStudio. 
+
+For full documentation on options for specific platforms:  
+
+-   [Posit Connect User Guide](https://docs.posit.co/connect/user/connecting/)
+-   [RPubs - Getting Started](https://rpubs.com/about/getting-started)
+-   [ShinyApps.io User Guide](https://docs.posit.co/shinyapps.io/)
+
+## Push-button deployment
+
+The blue **publishing icon** in RStudio indicates built-in support for publishing the currently selected type of content to Posit Connect, Shinyapps.io, or RPubs.com.
+
+![The RStudio publishing icon](images/publishIcon_2x.png){fig-alt="The RStudio publishing icon"}
+
+The blue **publishing icon** is present in the following locations:
+
+-   The upper right of the file editor
+
+-   The document **Viewer** pane when viewing a document
+
+-   The embedded **Viewer** when running a Shiny application
+
+-   The **Plots** pane
+
+Click the blue **publishing icon** to open a publishing dialog where you can name your content and select additional files to include in the deployment. By default, RStudio will try to infer the data files and scripts that are used in your content. This window lets you refine those file selections.
+
+![](images/publishing-quarto.png){fig-alt="RStudio publishing dialog for a Quarto document"}
+
+Typically, RStudio is able to determine automatically which files are needed to render your document on the remote server. However, there are situations in which it will miss a file (for instance, if it isn't referenced directly in your document). The **Add More\...** button lets you add files to the bundle, so that they will be available on the server when your document is rendered. You can also use the `resource_files` field in the document's YAML header to add additional files.
+
+Deployed data files must be in the same directory as the Shiny application or R Markdown/Quarto document, or in a subdirectory of that location. Files stored elsewhere on the computer will not be available on the remote server and cannot be included in the content bundle.
+
+Click **Publish** after verifying the settings.
+
+## Publishing documents
+
+You can publish R Markdown (`.Rmd`) and Quarto (`.qmd`) documents to Posit Connect or RPubs.com.
+
+![Publish to RPubs or Posit Connect](images/connecting-2.png){fig-alt="Publish to RPubs or Connect"}
+
+[RPubs](http://rpubs.com/) is a service for easily sharing public R Markdown documents. RPubs is not related to Posit Connect, and you should always choose "Posit Connect" if you wish to publish your content to Posit Connect.
+
+## Publishing Shiny apps
+
+You can publish Shiny apps to Posit Connect or shinyapps.io.
+
+![](images/connect-account.png){fig-alt="Connect account in RStudio"}
+
+## Including secrets
+
+Posit Connect supports including secrets and other sensitive information as [Vars (Environment Variables)](https://docs.posit.co/connect/user/content-settings/index.html#content-vars). When developing content for Connect, you should never place secrets (keys, tokens, passwords, etc.) in the code itself.
+
+RStudio also supports the inclusion of environment variables defined in the user/project `.Renviron` file when publishing content to Posit Connect. 
+
+![](images/publish-env-vars.png){fig-alt="Screenshot of including environment variables when publishing from RStudio."}
+
+One or more environment variables can be selected for inclusion on Posit Connect. On publish, environment variables are sent over an encrypted connection and are not stored in the bundle. Environment variables are set prior to deployment so that your code can use them and the first deployment can still succeed. This means that if the deployment fails, the values will still be updated.
+
+Reference the Posit Connect User Guide section on [Vars (Environment Variables)](https://docs.posit.co/connect/user/content-settings/index.html#content-vars) for more information. The `rsconnect` R package can also include environment variables when publishing programatically. For more information, reference the `[rsconnect` documentation for envVars](https://rstudio.github.io/rsconnect/reference/deployApp.html#arg-envvars)
+
+## Citing RStudio
+
+To cite RStudio in publications, retrieve the ciation information by running `RStudio.Version()`. For example:
+
+```{.r filename="console"}
+> RStudio.Version()
+$citation
+
+To cite RStudio in publications use:
+
+  Posit team (2026). RStudio: Integrated Development Environment for R. Posit Software,
+  PBC, Boston, MA. URL http://www.posit.co/.
+
+A BibTeX entry for LaTeX users is
+
+  @Manual{,
+    title = {RStudio: Integrated Development Environment for R},
+    author = {{Posit team}},
+    organization = {Posit Software, PBC},
+    address = {Boston, MA},
+    year = {2026},
+    url = {http://www.posit.co/},
+  }
+
+```
+
+
+## Additional content
+
+For additional details or other content types, refer to the product-specific documentation:
+
+-   [Posit Connect User Guide](https://docs.posit.co/connect/user/connecting/)
+-   [RPubs - Getting Started](https://rpubs.com/about/getting-started)
+-   [ShinyApps.io User Guide](https://docs.posit.co/shinyapps.io/)

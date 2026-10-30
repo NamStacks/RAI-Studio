@@ -1,0 +1,254 @@
+/*
+ * AceEditorMixins.java
+ *
+ * Copyright (C) 2022 by Posit Software, PBC
+ *
+ * Unless you have received this program directly from Posit Software pursuant
+ * to the terms of a commercial license agreement with Posit Software, then
+ * this program is licensed to you under the terms of version 3 of the
+ * GNU Affero General Public License. This program is distributed WITHOUT
+ * ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+ * AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+ *
+ */
+package org.rstudio.studio.client.workbench.views.source.editors.text;
+
+import org.rstudio.core.client.BrowseCap;
+import org.rstudio.core.client.CommandWithArg;
+import org.rstudio.core.client.StringUtil;
+import org.rstudio.studio.client.JavaScriptEventHistory;
+import org.rstudio.studio.client.RStudioGinjector;
+import org.rstudio.studio.client.JavaScriptEventHistory.EventData;
+import org.rstudio.studio.client.application.Desktop;
+import org.rstudio.studio.client.workbench.views.source.editors.text.ace.AceEditorNative;
+import org.rstudio.studio.client.workbench.views.source.editors.text.events.AceSelectionChangedEvent;
+
+import com.google.gwt.event.shared.HandlerRegistration;
+import com.google.gwt.user.client.Timer;
+import com.google.inject.Inject;
+
+public class AceEditorMixins
+{
+   public AceEditorMixins(AceEditor editor)
+   {
+      RStudioGinjector.INSTANCE.injectMembers(this);
+
+      aceEditor_ = editor;
+      editor_ = editor.getWidget().getEditor();
+      timer_ = new Timer()
+      {
+         @Override
+         public void run()
+         {
+            selectionPending_ = false;
+            Desktop.getFrame().setGlobalMouseSelection(lastSelection_);
+         }
+      };
+
+      initializeMixins(editor_);
+
+      // on Linux, record whenever the user selects something in Ace
+      if (BrowseCap.isLinuxDesktop())
+      {
+         selectionChangedReg_ = aceEditor_.addSelectionChangedHandler(new AceSelectionChangedEvent.Handler()
+         {
+            @Override
+            public void onSelectionChanged(AceSelectionChangedEvent event)
+            {
+               // only relevant if this editor is focused
+               if (!editor_.isFocused())
+                  return;
+
+               // save the current selection, and prepare to update pasteboard
+               String selection = editor_.getSelectedText();
+               lastSelection_ = selection;
+               selectionPending_ = true;
+               timer_.schedule(TIMER_DELAY_MS);
+            }
+         });
+      }
+   }
+
+   public void attach()
+   {
+      timer_.cancel();
+
+      // re-register the selection handler on Linux Desktop
+      if (BrowseCap.isLinuxDesktop())
+      {
+         if (selectionChangedReg_ != null)
+            selectionChangedReg_.removeHandler();
+
+         selectionChangedReg_ = aceEditor_.addSelectionChangedHandler(new AceSelectionChangedEvent.Handler()
+         {
+            @Override
+            public void onSelectionChanged(AceSelectionChangedEvent event)
+            {
+               if (!editor_.isFocused())
+                  return;
+
+               String selection = editor_.getSelectedText();
+               lastSelection_ = selection;
+               selectionPending_ = true;
+               timer_.schedule(TIMER_DELAY_MS);
+            }
+         });
+      }
+   }
+
+   public void detach()
+   {
+      timer_.cancel();
+
+      if (selectionChangedReg_ != null)
+      {
+         selectionChangedReg_.removeHandler();
+         selectionChangedReg_ = null;
+      }
+   }
+
+   // push a pending selection to the global mouse selection immediately,
+   // bypassing the debounce timer (invoked on mouse-up); a no-op when no
+   // selection is pending (e.g. on non-Linux-Desktop platforms)
+   private final void flushPendingSelection()
+   {
+      if (!selectionPending_)
+         return;
+
+      selectionPending_ = false;
+      timer_.cancel();
+      Desktop.getFrame().setGlobalMouseSelection(lastSelection_);
+   }
+
+   @Inject
+   private void initialize(JavaScriptEventHistory history)
+   {
+      history_ = history;
+   }
+   
+   private final native void initializeMixins(AceEditorNative editor)
+   /*-{
+      // store reference to mixins object
+      var self = this;
+
+      // override the 'onPaste()' method provided by the Editor prototype
+      editor.$onPaste = editor.onPaste;
+
+      editor.onPaste = $entry(function(text) {
+
+         // call mixins method
+         self.@org.rstudio.studio.client.workbench.views.source.editors.text.AceEditorMixins::onPaste(*)(this, text);
+
+      });
+
+      // flush any pending selection to the global mouse selection as soon as
+      // the mouse is released, so a quick select-then-middle-click-paste sees
+      // the selection even before the debounce timer has fired
+      editor.container.addEventListener("mouseup", $entry(function(event) {
+         self.@org.rstudio.studio.client.workbench.views.source.editors.text.AceEditorMixins::flushPendingSelection()();
+      }), true);
+
+   }-*/;
+   
+   private final void onPaste(AceEditorNative editor, String text)
+   {
+      // detect whether this paste event is issued in response to a middle click
+      // -- in such cases, we want to paste using the global mouse selection
+      boolean useGlobalMouseSelection =
+            BrowseCap.isLinuxDesktop() &&
+            isPasteTriggeredByMiddleClick();
+      
+      // command to be executed once required text has been made available
+      final CommandWithArg<String> onReadyToPaste = new CommandWithArg<String>()
+      {
+         @Override
+         public void execute(String code)
+         {
+            // normalize line endings (Ace expects only '\n' line endings based
+            // on how we initialize it, and '\r\n' line endings cause issues)
+            code = code.replaceAll("\r\n|\r", "\n");
+
+            // invoke paste handler
+            invokePasteHandler(editor, code);
+         }
+      };
+      
+      if (useGlobalMouseSelection)
+      {
+         Desktop.getFrame().getGlobalMouseSelection(selection ->
+         {
+            // the tracked selection is pushed on a debounce timer, and only
+            // by Ace editors -- so it can be empty here (e.g. the user selected
+            // and middle-clicked faster than the timer fired, or the selection
+            // came from a non-Ace source). in that case, fall back to the text
+            // the paste event already carried, which holds the primary selection.
+            String pasteText = StringUtil.isNullOrEmpty(selection) ? text : selection;
+            onReadyToPaste.execute(pasteText);
+         });
+      }
+      else
+      {
+         onReadyToPaste.execute(text);
+      }
+   }
+   
+   private final boolean isPasteTriggeredByMiddleClick()
+   {
+      // find the first key or mouse event in the JS event history
+      EventData event = history_.findEvent(new JavaScriptEventHistory.Predicate()
+      {
+         @Override
+         public boolean accept(EventData event)
+         {
+            String type = event.getType();
+            for (String candidate : CANDIDATES)
+               if (type.contentEquals(candidate))
+                  return true;
+            return false;
+         }
+         
+         private final String[] CANDIDATES = new String[] {
+               "mousedown", "click", "mouseup",
+               "keydown", "keypress", "keyup"
+         };
+      });
+      
+      // shouldn't happen, but guard against failure to find any
+      // associated event
+      if (event == null)
+         return false;
+      
+      // check to see if the middle mouse button was associated with
+      // this event
+      int button = event.getButton();
+      if (button != EventData.BUTTON_MIDDLE)
+         return false;
+      
+      // ensure that this was a click-related mouse event
+      // (be permissive as to what mouse even occurred)
+      String type = event.getType();
+      return
+            type.contentEquals("mousedown") ||
+            type.contentEquals("click") ||
+            type.contentEquals("mouseup");
+   }
+   
+   private static final native void invokePasteHandler(AceEditorNative editor, String text)
+   /*-{
+      editor.$onPaste(text);
+   }-*/;
+   
+   private static final int TIMER_DELAY_MS = 100;
+
+   private final AceEditor aceEditor_;
+   private final AceEditorNative editor_;
+   private final Timer timer_;
+
+   private String lastSelection_;
+   private boolean selectionPending_;
+   private HandlerRegistration selectionChangedReg_;
+   
+   // Injected ----
+   private static JavaScriptEventHistory history_;
+}
