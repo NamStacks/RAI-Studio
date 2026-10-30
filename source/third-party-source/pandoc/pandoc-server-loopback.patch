@@ -1,0 +1,19 @@
+--- a/server/PandocCLI/Server.hs
++++ b/server/PandocCLI/Server.hs
+@@ -30,6 +30,15 @@
+ runServer :: [String] -> IO ()
+ runServer args = do
+   sopts <- parseServerOptsFromArgs args
++  -- Optional local-only binding for packaged IDE qualification. Unset
++  -- preserves the upstream default; reject other overrides before listening.
++  host <- lookupEnv "PANDOC_SERVER_HOST"
++  settings <- case host of
++    Nothing -> pure Warp.defaultSettings
++    Just "127.0.0.1" -> pure $ Warp.setHost "127.0.0.1" Warp.defaultSettings
++    Just "::1" -> pure $ Warp.setHost "::1" Warp.defaultSettings
++    Just _ -> ioError $ userError "PANDOC_SERVER_HOST must be 127.0.0.1 or ::1"
+   hPutStrLn stderr $
+     "Starting server on port " <> show (serverPort sopts) <> "..."
+-  Warp.run (serverPort sopts) (timeout (serverTimeout sopts) app)
++  Warp.runSettings (Warp.setPort (serverPort sopts) settings)
++    (timeout (serverTimeout sopts) app)

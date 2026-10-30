@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+  <!-- Electron's V8 needs JIT and writable-executable pages in the main
+       process and every renderer/GPU/plugin helper. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+
+  <!-- The Electron main process dlopen()s bundled native addons
+       (.webpack/main/native_modules/*.node). They are all re-signed under
+       this same Developer ID, so they share our Team ID; keep this so a
+       future addon that is signed elsewhere still loads. Notarization
+       accepts this hardened-runtime exception. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- The Assistant terminal runs the provider CLI (claude, codex, grok) as a
+       child of this app. macOS attributes a child's microphone request to
+       this app, and a hardened-runtime app without this entitlement is
+       denied silently, with no prompt. Voice input in the Assistant
+       terminal needs it. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+
+</dict>
+</plist>

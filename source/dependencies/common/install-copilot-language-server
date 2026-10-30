@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+
+#
+# install-copilot-language-server
+#
+# Copyright (C) 2025 by Posit Software, PBC
+#
+# Unless you have received this program directly from Posit Software pursuant
+# to the terms of a commercial license agreement with Posit Software, then
+# this program is licensed to you under the terms of version 3 of the
+# GNU Affero General Public License. This program is distributed WITHOUT
+# ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+# MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+# AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+#
+#
+
+set -e
+
+source "$(dirname "${BASH_SOURCE[0]}")/../tools/rstudio-tools.sh"
+section "Installing Copilot Language Server"
+
+# version to download
+COPILOT_VERSION="1.509.1"
+
+# Function to check if Copilot language server is already installed with correct version
+check_copilot_installed() {
+  COPILOT_SUBDIR="copilot-language-server-js"
+  COPILOT_JS="${RSTUDIO_TOOLS_ROOT}/${COPILOT_SUBDIR}/language-server.js"
+  # Escape periods for regex
+  COPILOT_VERSION_REGEX="$(echo "$COPILOT_VERSION" | sed 's/\./\\./g')"
+  if [[ -f "${COPILOT_JS}" ]]; then
+    COPILOT_MAIN_JS="${RSTUDIO_TOOLS_ROOT}/${COPILOT_SUBDIR}/main.js"
+    if [[ -f "${COPILOT_MAIN_JS}" ]]; then
+      if grep -q "${COPILOT_VERSION_REGEX}" "${COPILOT_MAIN_JS}"; then
+        return 0  # Success - already installed
+      fi
+    fi
+  fi
+  return 1  # Not installed or wrong version
+}
+
+# Test if we already have it installed and is the correct version
+if check_copilot_installed; then
+  echo "Copilot language server ${COPILOT_VERSION} already installed"
+  exit 0
+fi
+
+# move to tools root
+sudo-if-necessary-for "${RSTUDIO_TOOLS_ROOT}" "$@"
+cd "${RSTUDIO_TOOLS_ROOT}"
+
+# reset Copilot subdirectory
+rm -rf "${COPILOT_SUBDIR}"
+mkdir -p "${COPILOT_SUBDIR}"
+pushd "${COPILOT_SUBDIR}"
+
+# download and extract copilot-language-server binary
+COPILOT_URL_BASE="${RSTUDIO_BUILDTOOLS}/copilot-language-server/${COPILOT_VERSION}"
+
+# Download and extract cross-platform JS version
+FILE="copilot-language-server-js-${COPILOT_VERSION}.zip"
+echo "Downloading ${FILE} from ${COPILOT_URL_BASE}/${FILE}"
+download "${COPILOT_URL_BASE}/${FILE}" "${FILE}"
+echo "Extracting ${FILE} to ${COPILOT_SUBDIR}"
+extract "${FILE}"
+rm -f "${FILE}"
+
+# Validate that the installation succeeded
+if check_copilot_installed; then
+  exit 0
+else
+  error "Copilot language server ${COPILOT_VERSION} in ${RSTUDIO_TOOLS_ROOT}/${COPILOT_SUBDIR} is not valid." >&2
+  exit 1
+fi

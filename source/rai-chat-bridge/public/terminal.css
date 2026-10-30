@@ -1,0 +1,426 @@
+/* Full-bleed dark terminal, clean macOS-Terminal-like feel. Original UI. */
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #1c1c1e;
+  overflow: hidden;
+}
+
+#term-shell {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #1c1c1e;
+  /* Extra bottom cushion so the CLI's last line (e.g. the status bar) isn't
+     flush against the pane edge -- FitAddon sizes xterm's row count to
+     exactly fill this container, so the room has to come from here. */
+  padding: 8px 8px 20px 8px;
+}
+
+/* xterm mounts here and the FitAddon sizes it to fill the pane */
+#term {
+  flex: 1 1 auto;
+  min-height: 0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #1c1c1e;
+  padding: 6px 8px;
+}
+
+#run-inspector[hidden] { display: none !important; }
+#run-inspector {
+  flex: 0 0 auto;
+  margin: 0 2px 6px;
+  padding: 7px 9px;
+  max-height: 150px;
+  overflow: auto;
+  color: #c7c7cc;
+  background: rgba(44, 44, 46, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  font: 11px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+#run-inspector-summary { font-weight: 600; }
+#run-inspector-safety { margin-top: 5px; color: #ffd60a; }
+
+#scoped-guidance {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  align-items: stretch;
+  gap: 6px;
+  padding: 0 2px 6px;
+  color: #98989d;
+  font: 11px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+#scoped-guidance button {
+  color: #e5e5e7;
+  background: #2c2c2e;
+  border: 1px solid #4a4a4d;
+  border-radius: 5px;
+  padding: 4px 7px;
+  cursor: pointer;
+}
+#scoped-guidance button:disabled { opacity: 0.45; cursor: default; }
+#scoped-guidance { padding-right: 46px; }
+#scoped-shortcuts { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+#scoped-guidance button { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; flex: 0 1 auto; }
+#scoped-guidance-status { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+
+.xterm { height: 100%; }
+.xterm .xterm-viewport { background: transparent !important; }
+.xterm-viewport::-webkit-scrollbar { width: 9px; }
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+}
+
+/* settings gear, fixed top-right of the terminal pane */
+#settings-gear {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  z-index: 10;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 30px;
+  color: #c7c7cc;
+  background: rgba(44, 44, 46, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+#settings-gear:hover { opacity: 1; transform: scale(1.05); }
+#settings-gear:active { transform: scale(0.96); }
+#restart-pending[hidden] { display: none !important; }
+#restart-pending { position: absolute; top: 14px; right: 54px; z-index: 10;
+  border: 1px solid #6aa8ff; border-radius: 6px; padding: 5px; color: #e5e5e7; background: #2c2c2e; }
+#restart-pending:disabled { opacity: .6; }
+
+/* Explicit because #settings-panel's flex display otherwise overrides HTML hidden. */
+#settings-panel[hidden] { display: none !important; }
+
+/* Native macOS system font for UI chrome -- monospace stays reserved for
+   the terminal content itself, so the settings panel reads as a real
+   macOS panel (San Francisco) rather than an extension of the terminal. */
+#settings-panel {
+  position: absolute;
+  top: 52px;
+  right: 16px;
+  z-index: 10;
+  width: min(390px, calc(100vw - 24px));
+  height: min(540px, calc(100vh - 64px));
+  min-height: 0;
+  overflow: hidden;
+  --settings-padding: 16px;
+  padding: var(--settings-padding);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: rgba(44, 44, 46, 0.82);
+  backdrop-filter: blur(24px) saturate(1.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
+  color: #e5e5e7;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  font: 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  animation: settings-panel-in 0.12s ease-out;
+}
+#settings-panel > * { flex-shrink: 0; }
+#settings-panel [role="tabpanel"] { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; margin-right: calc(4px - var(--settings-padding)); padding: 4px calc(var(--settings-padding) - 4px) 4px 4px; margin-left: -4px; scroll-padding: 4px; scroll-padding-bottom: 140px; }
+#settings-error, #settings-close-confirm { max-height: min(90px, 24vh); overflow-y: auto; flex: 0 1 auto !important; }
+#settings-actions { flex: 0 0 auto; padding: 10px 0 2px; background: rgba(44, 44, 46, 0.98); }
+html[data-theme="light"] #settings-actions { background: rgba(247, 247, 249, 0.98); }
+@keyframes settings-panel-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+#settings-global { min-width: 0; }
+#settings-global textarea { width: 100%; min-height: 190px; max-height: 230px; resize: none; line-height: 1.4; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+#settings-panel .settings-hint { margin: 0 0 10px; color: #aaaab0; font-size: 11px; line-height: 1.4; }
+#settings-general > .settings-hint { margin: 0; }
+#settings-panel [role="tabpanel"][hidden] { display: none !important; }
+#settings-general { display: flex; flex-direction: column; gap: 12px; }
+.settings-appearance { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.settings-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; padding: 3px; border-radius: 8px; background: rgba(0,0,0,0.24); }
+#settings-panel .settings-tabs button { min-width: 0; border: 0; background: transparent; padding: 6px 3px; color: #b8b8bd; font-size: inherit; line-height: 1.25; white-space: normal; overflow-wrap: anywhere; }
+#settings-panel .settings-tabs button[aria-selected="true"] { color: #fff; background: rgba(255,255,255,0.15); }
+#settings-snippets { min-width: 0; }
+#settings-global-prompt, #snippet-edit-prompt { font-size: 12px; }
+.snippet-top-actions { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+#snippet-count { margin-left: auto; color: #aaaab0; font-size: 11px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#settings-panel ::placeholder { color: rgba(229, 229, 231, 0.62); opacity: 1; }
+html[data-theme="light"] #settings-panel ::placeholder { color: #5c5c61; }
+html[data-theme="light"] #snippet-count { color: #6e6e73; }
+#settings-panel .snippet-top-actions button { min-width: 32px; min-height: 32px; padding: 4px 8px; }
+.snippet-fields { display: grid; gap: 12px; }
+#settings-snippets fieldset { margin: 0; padding: 9px; min-width: 0; border: 1px solid rgba(255,255,255,0.13); border-radius: 8px; }
+#settings-snippets legend { color: #e5e5e7; font-size: 12px; font-weight: 600; padding: 0 4px; }
+#settings-snippets fieldset label { margin: 7px 0 4px; }
+#settings-snippets fieldset input, #settings-snippets fieldset textarea { width: 100%; }
+#settings-snippets textarea { resize: none; width: 100%; min-height: 100px; max-height: 230px; line-height: 1.4; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+#snippet-list { display: grid; gap: 4px; margin: 8px 0; }
+#snippet-list button { width: 100%; text-align: left; }
+#snippet-list button[aria-selected="true"] { border-color: #6aa8ff; }
+#snippet-editor { margin-top: 10px; }
+#snippet-editor[hidden] { display: none !important; }
+#snippet-editor input { width: 100%; }
+.snippet-edit-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.settings-approval { display: flex !important; flex-direction: row !important; align-items: center; text-transform: none !important; font-size: 13px !important; }
+.settings-approval input { width: auto; }
+@media (max-width: 360px) {
+  #settings-panel { right: 8px; width: calc(100vw - 16px); --settings-padding: 12px; }
+}
+@media (max-width: 240px) {
+  #settings-provider-list { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-height: 360px) {
+  #settings-panel { top: 8px; right: 8px; height: calc(100dvh - 16px); --settings-padding: 8px; gap: 5px; }
+  #settings-actions { padding: 3px 0 0; }
+  #settings-panel [role="tabpanel"] { scroll-padding-bottom: 44px; }
+  #settings-panel textarea { min-height: 64px; height: 64px; max-height: 64px; }
+  #settings-error, #settings-close-confirm { max-height: 52px; }
+}
+#settings-reset-snippets { margin-top: 10px; }
+#settings-panel textarea { padding: 7px 9px; color: #e5e5e7; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.12); border-radius: 7px; }
+#settings-panel textarea:focus { outline: none; border-color: #6aa8ff; box-shadow: 0 0 0 3px rgba(106,168,255,0.25); }
+#settings-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #98989d;
+  font-size: 11px;
+  font-weight: 590;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+#settings-panel select,
+#settings-panel input {
+  padding: 7px 9px;
+  color: #e5e5e7;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  font: 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  transition: border-color 0.12s ease;
+}
+#settings-panel select:focus,
+#settings-panel input:focus {
+  outline: none;
+  border-color: #6aa8ff;
+  box-shadow: 0 0 0 3px rgba(106, 168, 255, 0.25);
+}
+#settings-error[hidden] { display: none; }
+#settings-error { color: #ff8a87; font-size: 11px; line-height: 1.4; }
+#settings-provider-status a { color: #6aa8ff; text-decoration: underline; }
+#settings-panel input[type="checkbox"]:focus-visible { outline: 2px solid #6aa8ff; outline-offset: 2px; }
+#settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+#settings-provider-status {
+  color: #c7c7cc;
+  font-size: 12px;
+  line-height: 1.35;
+}
+#settings-provider-status[data-state="authenticated"]::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin: 0 6px 1px 0;
+  border-radius: 50%;
+  background: #30d158;
+  box-shadow: 0 0 0 2px rgba(48, 209, 88, 0.16);
+}
+#settings-active-model {
+  color: #c7c7cc;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#settings-provider-actions { display: flex; gap: 8px; }
+#settings-provider-actions button { flex: 1 1 0; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.settings-theme-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #98989d;
+  font-size: 11px;
+  font-weight: 590;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.settings-theme-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 2px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+}
+#settings-panel .settings-theme-toggle button {
+  padding: 5px 8px;
+  color: #98989d;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  font-size: 11px;
+}
+#settings-panel .settings-theme-toggle button.selected {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.16);
+}
+#settings-panel .settings-theme-toggle button:hover { background: rgba(255, 255, 255, 0.1); }
+#settings-panel .settings-theme-toggle button.selected:hover { background: rgba(255, 255, 255, 0.2); }
+#settings-panel button {
+  padding: 6px 14px;
+  color: #e5e5e7;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  cursor: pointer;
+  font: 500 12.5px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  transition: background 0.12s ease;
+}
+#settings-actions button:hover { background: rgba(255, 255, 255, 0.14); }
+#settings-save {
+  color: #fff !important;
+  background: #2f6fed !important;
+  border-color: #2f6fed !important;
+}
+#settings-save:hover { background: #2a63d6 !important; }
+
+html[data-theme="light"],
+html[data-theme="light"] body,
+html[data-theme="light"] #term-shell,
+html[data-theme="light"] #term {
+  background: #ffffff;
+}
+html[data-theme="light"] #settings-gear {
+  color: #3a3a3c;
+  background: rgba(250, 250, 252, 0.9);
+  border-color: rgba(0, 0, 0, 0.14);
+}
+html[data-theme="light"] #restart-pending { color: #1d1d1f; background: #f5f5f7; border-color: #3065c2; }
+html[data-theme="light"] #scoped-guidance { color: #55555a; }
+html[data-theme="light"] #scoped-guidance button { color: #1d1d1f; background: #f5f5f7; border-color: #8e8e93; }
+html[data-theme="light"] #settings-panel {
+  color: #1d1d1f;
+  background: rgba(250, 250, 252, 0.92);
+  border-color: rgba(0, 0, 0, 0.14);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+html[data-theme="light"] #settings-panel label,
+html[data-theme="light"] .settings-theme-control { color: #6e6e73; }
+html[data-theme="light"] .settings-theme-toggle {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.14);
+}
+html[data-theme="light"] #settings-panel .settings-theme-toggle button { color: #6e6e73; }
+html[data-theme="light"] #settings-panel .settings-theme-toggle button.selected {
+  color: #1d1d1f;
+  background: rgba(0, 0, 0, 0.1);
+}
+html[data-theme="light"] #settings-panel .settings-theme-toggle button:hover { background: rgba(0, 0, 0, 0.06); }
+html[data-theme="light"] #settings-panel .settings-theme-toggle button.selected:hover { background: rgba(0, 0, 0, 0.14); }
+html[data-theme="light"] #settings-panel select,
+html[data-theme="light"] #settings-panel input,
+html[data-theme="light"] #settings-panel textarea {
+  color: #1d1d1f;
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.15);
+}
+html[data-theme="light"] #settings-provider-status,
+html[data-theme="light"] #term-status { color: #3a3a3c; }
+html[data-theme="light"] #settings-error { color: #b3261e; }
+html[data-theme="light"] #settings-provider-status a { color: #1558c0; }
+html[data-theme="light"] #settings-snippets legend { color: #1d1d1f; }
+html[data-theme="light"] #settings-panel .settings-hint { color: #6e6e73; }
+html[data-theme="light"] #settings-snippets fieldset { border-color: rgba(0,0,0,0.15); }
+html[data-theme="light"] #settings-panel .settings-tabs button { color: #55555a; }
+html[data-theme="light"] #settings-panel .settings-tabs button[aria-selected="true"] { color: #1d1d1f; background: rgba(0,0,0,0.1); }
+html[data-theme="light"] #settings-panel button {
+  color: #1d1d1f;
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.14);
+}
+html[data-theme="light"] #settings-actions button:hover { background: rgba(0, 0, 0, 0.1); }
+html[data-theme="light"] .xterm-viewport::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.2); }
+html[data-theme="light"] #run-inspector {
+  color: #3a3a3c;
+  background: #f5f5f7;
+  border-color: rgba(0, 0, 0, 0.12);
+}
+html[data-theme="light"] #run-inspector-safety { color: #8a5a00; }
+
+/* transient banner on pty exit / disconnect */
+#term-status {
+  flex: 0 0 auto;
+  font: 12px ui-monospace, "SF Mono", Menlo, monospace;
+  color: #c7c7cc;
+  padding: 6px 10px;
+  text-align: center;
+  opacity: 0.85;
+}
+
+#pending-draft { flex: 0 0 auto; padding: 6px; max-height: min(180px, 65vh); overflow: auto; color: #e5e5e7; background: #2c2c2e; font: 12px -apple-system, sans-serif; }
+#pending-draft textarea { display: block; width: 100%; height: clamp(36px, 18vh, 70px); max-height: 70px; resize: none; color: inherit; background: #1c1c1e; border: 1px solid #646469; border-radius: 5px; }
+#pending-draft button { margin: 5px 5px 0 0; color: inherit; background: #3a3a3c; border: 1px solid #646469; border-radius: 5px; padding: 3px 6px; font: 500 11px -apple-system, sans-serif; }
+#pending-draft button:disabled { opacity: .6; }
+html[data-theme="light"] #pending-draft { color: #1d1d1f; background: #f5f5f7; border: 1px solid #c6c6cc; }
+html[data-theme="light"] #pending-draft textarea { color: #1d1d1f; background: #fff; border-color: #8e8e93; }
+html[data-theme="light"] #pending-draft button { color: #1d1d1f; background: #fff; border-color: #8e8e93; }
+
+#pending-draft[hidden] { display: none !important; }
+
+/* Native CLI overview: one chip per provider with its sign-in state. */
+#settings-provider-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+#settings-provider-list:empty { display: none; }
+#settings-panel .native-cli { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; row-gap: 1px; align-items: center; text-align: left; padding: 7px 9px; min-width: 0; }
+#settings-panel .native-cli[aria-pressed="true"] { border-color: #6aa8ff; box-shadow: 0 0 0 2px rgba(106,168,255,0.25); }
+.native-cli-dot { grid-row: 1 / span 2; width: 9px; height: 9px; border-radius: 50%; background: #8e8e93; }
+.native-cli[data-state="authenticated"] .native-cli-dot, .native-cli[data-state="api-configured"] .native-cli-dot { background: #30d158; }
+.native-cli[data-state="unauthenticated"] .native-cli-dot { background: #ffb340; }
+.native-cli-name { font-weight: 600; overflow-wrap: anywhere; }
+.native-cli-state { font-size: 11px; opacity: 0.75; overflow-wrap: anywhere; }
+html[data-theme="light"] .native-cli[data-state="authenticated"] .native-cli-dot { background: #1f9d3a; }
+html[data-theme="light"] .native-cli[data-state="unauthenticated"] .native-cli-dot { background: #c77700; }
+
+.settings-theme-toggle.settings-fontsize-toggle { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+#settings-panel .settings-fontsize-toggle button { min-width: 0; padding: 5px 4px; overflow-wrap: anywhere; }
+#settings-panel .native-cli { padding: 6px 8px; column-gap: 6px; }
+.native-cli-name { font-size: 12px; }
+.native-cli-state { font-size: 10.5px; }
+#settings-provider-status { font-size: 11.5px; }
+.native-cli[data-state="checking"] .native-cli-dot { background: #8e8e93; }
+html[data-theme="light"] .native-cli[data-state="api-configured"] .native-cli-dot { background: #1f9d3a; }
+html[data-theme="light"] #settings-panel .native-cli[aria-pressed="true"] { border-color: #2f6fed; box-shadow: 0 0 0 2px rgba(47, 111, 237, 0.2); }
+
+/* Light theme: keyboard focus, the selected snippet and the inactive labels stay visible. */
+html[data-theme="light"] #settings-panel input:focus,
+html[data-theme="light"] #settings-panel textarea:focus,
+html[data-theme="light"] #settings-panel select:focus { border-color: #1558c0; box-shadow: 0 0 0 3px rgba(21, 88, 192, 0.35); }
+html[data-theme="light"] #snippet-list button[aria-selected="true"] { border-color: #2f6fed; box-shadow: 0 0 0 2px rgba(47, 111, 237, 0.25); }
+html[data-theme="light"] #settings-panel .settings-tabs button { color: #3a3a3c; }
+html[data-theme="light"] #settings-panel .settings-theme-toggle button { color: #55555a; }
+html[data-theme="light"] #settings-panel .settings-theme-toggle button.selected { color: #1d1d1f; }
+/* Leave room for the Restart Assistant button so it never covers the snippet shortcuts. */
+body:has(#restart-pending:not([hidden])) #scoped-guidance { padding-right: 190px; }
+@media (max-width: 480px) {
+  body:has(#restart-pending:not([hidden])) #scoped-guidance { padding-right: 46px; padding-top: 42px; }
+}

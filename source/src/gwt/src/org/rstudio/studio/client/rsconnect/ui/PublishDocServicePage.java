@@ -1,0 +1,104 @@
+/*
+ * PublishDocServicePage.java
+ *
+ * Copyright (C) 2022 by Posit Software, PBC
+ *
+ * Unless you have received this program directly from Posit Software pursuant
+ * to the terms of a commercial license agreement with Posit Software, then
+ * this program is licensed to you under the terms of version 3 of the
+ * GNU Affero General Public License. This program is distributed WITHOUT
+ * ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+ * AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+ *
+ */package org.rstudio.studio.client.rsconnect.ui;
+
+import java.util.ArrayList;
+
+import org.rstudio.core.client.resources.ImageResource2x;
+import org.rstudio.core.client.widget.WizardNavigationPage;
+import org.rstudio.core.client.widget.WizardPage;
+import org.rstudio.studio.client.rsconnect.RsconnectConstants;
+import org.rstudio.studio.client.rsconnect.model.RSConnectPublishInput;
+import org.rstudio.studio.client.rsconnect.model.RSConnectPublishResult;
+import org.rstudio.studio.client.rsconnect.ui.RSConnectDeploy.ServerType;
+
+import com.google.gwt.core.client.GWT;
+import com.google.gwt.resources.client.ImageResource;
+
+public class PublishDocServicePage 
+   extends WizardNavigationPage<RSConnectPublishInput, RSConnectPublishResult>
+{
+   public PublishDocServicePage(String title, String subTitle, 
+                                ImageResource icon,
+                                RSConnectPublishInput input)
+   {
+      super(title, subTitle, constants_.publishTo(), icon, null, createPages(input));
+   }
+   
+   private static ArrayList<WizardPage<RSConnectPublishInput, 
+                                       RSConnectPublishResult>> 
+           createPages(RSConnectPublishInput input)
+   {
+      ArrayList<WizardPage<RSConnectPublishInput, 
+                           RSConnectPublishResult>> pages = new ArrayList<>();
+      String rscTitle = RSConnectAccountWizard.SERVICE_NAME;
+      String rscDesc = RSConnectAccountWizard.SERVICE_DESCRIPTION;
+           
+      WizardPage<RSConnectPublishInput, RSConnectPublishResult> connectPage;
+      if (input.isMultiRmd() && !input.isWebsiteRmd())
+      {
+         connectPage = new PublishMultiplePage(rscTitle, rscDesc,
+               new ImageResource2x(RSConnectResources.INSTANCE.localAccountIcon2x()), input,
+               ServerType.RSCONNECT);
+      }
+      else 
+      {
+         if (input.isStaticDocInput())
+         {
+            // static input implies static output
+            connectPage = new PublishFilesPage(rscTitle, rscDesc,
+                  new ImageResource2x(RSConnectResources.INSTANCE.localAccountIcon2x()), input,
+                  false, true, ServerType.RSCONNECT);
+         }
+         else
+         {
+            connectPage = new PublishReportSourcePage(rscTitle, rscDesc,
+                  constants_.publishToRstudioConnect(),
+                  new ImageResource2x(RSConnectResources.INSTANCE.localAccountIcon2x()), input, 
+                  false, true, ServerType.RSCONNECT);
+         }
+      }
+      if (input.isConnectUIEnabled())
+         pages.add(connectPage);
+      if (input.isExternalUIEnabled())
+      {
+         WizardPage<RSConnectPublishInput, RSConnectPublishResult> connectCloudPage;
+         if (input.isStaticDocInput())
+         {
+            connectCloudPage = new PublishFilesPage(
+                  constants_.positConnectCloud(),
+                  constants_.positConnectCloudSubTitle(),
+                  new ImageResource2x(RSConnectResources.INSTANCE.cloudAccountIcon2x()),
+                  input, false, true, ServerType.CONNECT_CLOUD);
+         }
+         else
+         {
+            connectCloudPage = new PublishReportSourcePage(
+                  constants_.positConnectCloud(),
+                  constants_.positConnectCloudSubTitle(),
+                  constants_.positConnectCloudCaption(),
+                  new ImageResource2x(RSConnectResources.INSTANCE.cloudAccountIcon2x()),
+                  input, false, true, ServerType.CONNECT_CLOUD);
+         }
+         pages.add(connectCloudPage);
+      }
+      if (input.isExternalUIEnabled() && !input.isWebsiteRmd())
+      {
+         pages.add(new PublishRPubsPage("RPubs", constants_.rPubsSubtitle()));
+      }
+
+      return pages;
+   }
+   private static final RsconnectConstants constants_ = GWT.create(RsconnectConstants.class);
+}

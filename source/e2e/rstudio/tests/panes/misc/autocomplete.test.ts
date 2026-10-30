@@ -1,0 +1,276 @@
+import { test, expect } from '@fixtures/rstudio.fixture';
+import { ConsolePaneActions } from '@actions/console_pane.actions';
+import { SourcePaneActions } from '@actions/source_pane.actions';
+import { AutocompleteActions } from '@actions/autocomplete.actions';
+
+const contexts = ['console', 'editor'] as const;
+type Context = (typeof contexts)[number];
+
+for (const context of contexts) {
+  test.describe(`Autocomplete [${context}]`, () => {
+    let consoleActions: ConsolePaneActions;
+    let sourceActions: SourcePaneActions;
+    let autocomplete: AutocompleteActions;
+
+    test.beforeAll(async ({ rstudioPage: page }) => {
+      consoleActions = new ConsolePaneActions(page);
+      sourceActions = new SourcePaneActions(page, consoleActions);
+      autocomplete = new AutocompleteActions(page, consoleActions, sourceActions);
+      await consoleActions.resetSourcePane();
+      await consoleActions.executeInConsole('rm(list = ls())', { wait: true });
+    });
+
+    // Safety: ensure clean editor state before each editor test
+    test.beforeEach(async () => {
+      if (context === 'editor') {
+        await consoleActions.resetSourcePane();
+      }
+    });
+
+    // Safety: dismiss lingering popups or partial input between tests
+    test.afterEach(async ({ rstudioPage: page }) => {
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('Escape');
+      if (context === 'editor') {
+        await consoleActions.resetSourcePane();
+      }
+    });
+
+    /** Get completions in the current context. */
+    async function getCompletions(
+      setupCode: string[],
+      triggerText: string,
+      cursorLine?: number,
+      cursorCol?: number,
+    ): Promise<string[]> {
+      if (context === 'console') {
+        return autocomplete.getCompletionsInConsole(setupCode, triggerText);
+      } else {
+        return autocomplete.getCompletionsInEditor(setupCode, triggerText, cursorLine, cursorCol);
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue 13196 — Function parameter completions
+    // https://github.com/rstudio/rstudio/issues/13196
+    // -----------------------------------------------------------------------
+    test.describe('Issue 13196 - Function parameter completions', () => {
+
+      test('base function: cat(', async ({ rstudioPage: page }) => {
+        const items = await getCompletions([], 'cat(');
+        expect(items).toEqual(expect.arrayContaining(['... =', 'file =', 'sep =', 'fill =', 'labels =', 'append =']));
+        expect(items).toHaveLength(6);
+      });
+
+      test('non-base function: stats::rnorm(', async ({ rstudioPage: page }) => {
+        const items = await getCompletions([], 'stats::rnorm(');
+        expect(items).toEqual(expect.arrayContaining(['n =', 'mean =', 'sd =']));
+        expect(items).toHaveLength(3);
+      });
+
+      test('user-defined function', async ({ rstudioPage: page }) => {
+        const items = await getCompletions(
+          ['a <- function(x, y, z) { print(x + y) }'],
+          'a(',
+        );
+        expect(items).toEqual(expect.arrayContaining(['x =', 'y =', 'z =']));
+        expect(items).toHaveLength(3);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Issue 13291 — List $ completions with data preview
+    // https://github.com/rstudio/rstudio/issues/13291
+    // -----------------------------------------------------------------------
+    test.describe('Issue 13291 - List $ completions', () => {
+
+      test('list member names appear after $', async ({ rstudioPage: page }) => {
+        const items = await getCompletions(
+          [
+            'test_df <- data.frame(col1 = rep(1, 3), col2 = rep(2, 3), col3 = rep(3, 3))',
+            'test_ls <- list(a = test_df, b = test_df)',
+          ],
+          'test_ls$',
+        );
+        expect(items).toEqual(expect.arrayContaining(['a', 'b']));
+        expect(items).toHaveLength(2);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Issue 12678 — Completion ordering (local variables first)
+    // https://github.com/rstudio/rstudio/issues/12678
+    // -----------------------------------------------------------------------
+    test.describe('Issue 12678 - Completion ordering', () => {
+      let missingPackages: string[] = [];
+
+      test.beforeAll(async () => {
+        missingPackages = await consoleActions.ensurePackages(['dplyr']);
+      });
+
+      test('local variables show up first', async ({ rstudioPage: page }) => {
+        test.skip(missingPackages.length > 0, `Missing: ${missingPackages.join(', ')}`);
+        const items = await getCompletions(
+          ['library(dplyr)', 'left_table <- tibble(x = 1)'],
+          'lef',
+        );
+        expect(items).toContain('left_table');
+        expect(items).toContain('left_join');
+        // Local variable must appear before the package function (regardless of popup direction)
+        const localIdx = items.indexOf('left_table');
+        const pkgIdx = items.indexOf('left_join');
+        expect(Math.abs(localIdx - pkgIdx)).toBe(1);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Issue 12918 — data.table $ completions without bogus error
+    // https://github.com/rstudio/rstudio/issues/12918
+    // -----------------------------------------------------------------------
+    test.describe('Issue 12918 - data.table $ completions', () => {
+      let missingPackages: string[] = [];
+
+      test.beforeAll(async () => {
+        missingPackages = await consoleActions.ensurePackages(['data.table', 'pillar']);
+      });
+
+      test('$ completions appear without error', async ({ rstudioPage: page }) => {
+        test.skip(missingPackages.length > 0, `Missing: ${missingPackages.join(', ')}`);
+        const items = await getCompletions(
+          [
+            'library(data.table)',
+            'library(pillar)',
+            'StartDateTime <- as.POSIXct("2023-01-01", origin="1970-01-01")',
+            'DateTime10 <- seq(StartDateTime, StartDateTime+10, length.out=11)',
+            'test.df <- as.data.table(cbind(c(1:11), DateTime10, shift(DateTime10)))',
+            'test.df <- cbind(test.df, test.df$V3)',
+            'test.df$V2 <- as.POSIXct(test.df$V2, origin = "1960-01-01")',
+          ],
+          'test.df$',
+        );
+        // Main assertion: completions appeared (no bogus error killed the popup)
+        expect(items.length).toBeGreaterThan(0);
+        expect(items).toContain('V1');
+        expect(items).toContain('DateTime10');
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Issue 14625 — Unicode column names in completions
+    // https://github.com/rstudio/rstudio/issues/14625
+    // -----------------------------------------------------------------------
+    test.describe('Issue 14625 - Unicode column names', () => {
+      let missingPackages: string[] = [];
+
+      test.beforeAll(async () => {
+        missingPackages = await consoleActions.ensurePackages(['tibble']);
+      });
+
+      test('Unicode column names appear in completions', async ({ rstudioPage: page }) => {
+        test.skip(missingPackages.length > 0, `Missing: ${missingPackages.join(', ')}`);
+        const items = await getCompletions(
+          [
+            'library(tibble)',
+            'd <- tibble(ちちち = rnorm(10), 面面面 = rnorm(10))',
+          ],
+          'd$',
+        );
+        expect(items).toContain('ちちち');
+        expect(items).toContain('面面面');
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Issue 18125 — ggplot2 aesthetic completions when the token matches only
+    // an aesthetic, not a formal argument.
+    // https://github.com/rstudio/rstudio/issues/18125
+    //
+    // `geom_line()` has real formal args `lineend`/`linejoin`/`linemitre`, so
+    // the token `line` matched a formal and the geom's aesthetics (`linetype`,
+    // `linewidth`) were offered too. But `linet` matched no formal, which used
+    // to suppress the aesthetics entirely -- so `linetype` (an aesthetic, not a
+    // formal) went missing and the popup showed "No match".
+    // -----------------------------------------------------------------------
+    test.describe('Issue 18125 - ggplot2 aesthetic completions', () => {
+      let missingPackages: string[] = [];
+
+      test.beforeAll(async () => {
+        missingPackages = await consoleActions.ensurePackages(['ggplot2']);
+      });
+
+      // The completion helpers force the popup to display via the
+      // window.rstudio.completions bridge, so the unique match is listed
+      // here rather than auto-accepted (the auto-accept behavior itself is
+      // covered by the editor-only test below).
+      test('aesthetic-only token completes (linet -> linetype)', async () => {
+        test.skip(missingPackages.length > 0, `Missing: ${missingPackages.join(', ')}`);
+        const items = await getCompletions(['library(ggplot2)'], 'geom_line(linet');
+        expect(items).toContain('linetype =');
+      });
+
+      if (context === 'editor') {
+        // Without the popup override, an explicit completion request
+        // (Ctrl+Space) with a unique match is accepted directly into the
+        // buffer and the popup never shows.
+        test('unique match is auto-accepted on explicit request', async () => {
+          test.skip(missingPackages.length > 0, `Missing: ${missingPackages.join(', ')}`);
+          const line = await autocomplete.completeInEditorExpectingUniqueMatch(
+            ['library(ggplot2)'],
+            'geom_line(linet',
+          );
+          expect(line).toBe('geom_line(linetype = ');
+        });
+      }
+
+      test('token matching a formal also offers aesthetics', async () => {
+        test.skip(missingPackages.length > 0, `Missing: ${missingPackages.join(', ')}`);
+        const items = await getCompletions(['library(ggplot2)'], 'geom_line(line');
+        // Both real formal args and aesthetics surface for the shorter token.
+        expect(items).toContain('lineend =');   // formal argument
+        expect(items).toContain('linetype =');  // aesthetic
+        expect(items).toContain('linewidth ='); // aesthetic
+      });
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Issue 17831 — Completions update when deleting a colon (`pkg:::` -> `pkg::`)
+// https://github.com/rstudio/rstudio/issues/17831
+//
+// Console-only: the regression is in the shared backspace handling in
+// RCompletionManager, so exercising one context is sufficient.
+// ---------------------------------------------------------------------------
+test.describe('Issue 17831 - Namespace completions update on backspace', () => {
+  let consoleActions: ConsolePaneActions;
+  let sourceActions: SourcePaneActions;
+  let autocomplete: AutocompleteActions;
+
+  test.beforeAll(async ({ rstudioPage: page }) => {
+    consoleActions = new ConsolePaneActions(page);
+    sourceActions = new SourcePaneActions(page, consoleActions);
+    autocomplete = new AutocompleteActions(page, consoleActions, sourceActions);
+    await consoleActions.resetSourcePane();
+  });
+
+  test.afterEach(async ({ rstudioPage: page }) => {
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+  });
+
+  test('deleting a colon narrows tools::: to tools::', async () => {
+    const { all, exported } =
+      await autocomplete.getNamespaceCompletionsBeforeAndAfterBackspace('tools');
+
+    expect(all.length).toBeGreaterThan(0);
+    expect(exported.length).toBeGreaterThan(0);
+
+    // The exported-only list must be strictly smaller than the all-objects
+    // list (tools always has more internal than exported objects), and every
+    // exported entry must also appear in the all-objects list.
+    expect(exported.length).toBeLessThan(all.length);
+    for (const item of exported) {
+      expect(all).toContain(item);
+    }
+  });
+});
