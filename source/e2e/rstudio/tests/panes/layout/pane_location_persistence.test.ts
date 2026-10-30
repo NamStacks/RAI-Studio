@@ -1,0 +1,169 @@
+import { test as base, expect } from '@playwright/test';
+import { launchRStudio, shutdownRStudio, type DesktopSession } from '@fixtures/desktop.fixture';
+import { executeCommand } from '@utils/commands';
+import type { Page } from 'playwright';
+
+// Pane Layout preferences dialog selectors
+const PANE_LAYOUT_TAB = '#rstudio_label_pane_layout_options';
+const PANE_LAYOUT_PANEL = '#rstudio_label_pane_layout_options_panel';
+const OPTIONS_OK = '#rstudio_preferences_confirm';
+
+// Pane layout dialog containers (where tab checkboxes live)
+const LAYOUT_SIDEBAR = '#rstudio_pane_layout_sidebar';
+const LAYOUT_RIGHT_TOP = '#rstudio_pane_layout_right_top';
+const LAYOUT_RIGHT_BOTTOM = '#rstudio_pane_layout_right_bottom';
+
+// Workbench pane containers (the actual panes in the IDE)
+const SIDEBAR_PANE = '#rstudio_Sidebar_pane';
+const TABSET1_PANE = '#rstudio_TabSet1_pane';
+const TABSET2_PANE = '#rstudio_TabSet2_pane';
+
+/**
+ * Open Global Options and navigate to the Pane Layout tab.
+ */
+async function openPaneLayoutOptions(page: Page): Promise<void> {
+  await executeCommand(page, 'showOptions');
+  await page.waitForSelector(OPTIONS_OK, { timeout: 15000 });
+  await page.locator(PANE_LAYOUT_TAB).click();
+  await expect(page.locator(PANE_LAYOUT_PANEL)).toBeVisible({ timeout: 5000 });
+}
+
+/**
+ * In the Pane Layout dialog, toggle a tab's checkbox within a container.
+ */
+async function toggleTabInContainer(page: Page, containerSelector: string, tabLabel: string): Promise<void> {
+  const container = page.locator(containerSelector);
+  const checkbox = container.locator(`label:has-text("${tabLabel}") input[type="checkbox"], label:has-text("${tabLabel}") >> xpath=../input`);
+  const label = container.locator(`text="${tabLabel}"`);
+  if (await checkbox.count() > 0) {
+    await checkbox.first().click();
+  } else {
+    await label.click();
+  }
+}
+
+/**
+ * Check if a tab's checkbox is checked in a specific container.
+ */
+async function isTabCheckedInContainer(page: Page, containerSelector: string, tabLabel: string): Promise<boolean> {
+  const container = page.locator(containerSelector);
+  const checkbox = container.locator(`label:has-text("${tabLabel}") input[type="checkbox"]`).first();
+  if (await checkbox.count() === 0) return false;
+  return checkbox.isChecked();
+}
+
+/**
+ * Determine which workbench pane contains a given tab.
+ * Returns "sidebar", "tabSet1", "tabSet2", or "not found".
+ */
+async function findTabLocation(page: Page, tabSelector: string): Promise<string> {
+  for (const [paneSelector, name] of [
+    [SIDEBAR_PANE, 'sidebar'],
+    [TABSET1_PANE, 'tabSet1'],
+    [TABSET2_PANE, 'tabSet2'],
+  ] as const) {
+    if (await page.locator(`${paneSelector} ${tabSelector}`).count() > 0) return name;
+  }
+  return 'not found';
+}
+
+/**
+ * Ensure a tab is checked in the target container and unchecked in the source.
+ */
+async function moveTab(page: Page, tabLabel: string, fromContainer: string, toContainer: string): Promise<void> {
+  if (await isTabCheckedInContainer(page, fromContainer, tabLabel)) {
+    await toggleTabInContainer(page, fromContainer, tabLabel);
+  }
+  if (!(await isTabCheckedInContainer(page, toContainer, tabLabel))) {
+    await toggleTabInContainer(page, toContainer, tabLabel);
+  }
+}
+
+/**
+ * Pane location persistence — rstudio/rstudio#17177
+ *
+ * Verifies that pane assignments persist across RStudio restarts.
+ * Moves Posit Assistant from sidebar to a pane AND Help from a pane
+ * to the sidebar in a single session, then restarts and checks both
+ * persisted.
+ */
+base.describe('Pane location persistence - #17177', { tag: ['@desktop_only'] }, () => {
+  let session: DesktopSession;
+
+  base('Pane assignments persist after restart', async () => {
+    // --- Phase 1: Launch and rearrange panes ---
+    session = await launchRStudio();
+    const page = session.page;
+
+    await openPaneLayoutOptions(page);
+
+    const assistantOption = page.locator(`${LAYOUT_SIDEBAR} label:has-text("Posit Assistant")`);
+    if (await assistantOption.count() === 0) {
+      await shutdownRStudio(session);
+      base.skip(true, 'requires Posit Assistant to be enabled in this packaged fixture');
+      return;
+    }
+
+    // Reset to defaults so we start from a known state. The post-reset
+    // sidebar-visible state isn't guaranteed (it depends on the running
+    // session's pref defaults), so explicitly toggle if needed instead of
+    // polling for a particular value.
+    await page.locator('#rstudio_pane_layout_reset_link').click();
+    const sidebarCheckbox = page.locator('#rstudio_pane_layout_sidebar_visible');
+    // Wait for the reset to land before reading the checkbox state -- the
+    // reset link applies asynchronously and reading immediately can race it.
+    await expect(sidebarCheckbox).toBeVisible({ timeout: 5000 });
+    if (!(await sidebarCheckbox.isChecked())) {
+      await sidebarCheckbox.click();
+      await expect.poll(() => sidebarCheckbox.isChecked(), { timeout: 2000 }).toBe(true);
+    }
+
+    // Move Posit Assistant into TabSet1 (right-top)
+    await moveTab(page, 'Posit Assistant', LAYOUT_SIDEBAR, LAYOUT_RIGHT_TOP);
+
+    // Move Help into sidebar (Help is in TabSet2 / right-bottom by default)
+    await moveTab(page, 'Help', LAYOUT_RIGHT_BOTTOM, LAYOUT_SIDEBAR);
+
+    await page.locator(OPTIONS_OK).click();
+    await expect(page.locator(OPTIONS_OK)).toBeHidden({ timeout: 15000 });
+
+    // Verify both moved correctly before restart. Poll because the workbench
+    // re-layout runs asynchronously after the OK dispatches.
+    await expect.poll(
+      () => findTabLocation(page, '#rstudio_workbench_tab_posit_assistant'),
+      { timeout: 10000 },
+    ).toBe('tabSet1');
+    await expect.poll(
+      () => findTabLocation(page, '#rstudio_workbench_tab_help'),
+      { timeout: 10000 },
+    ).toBe('sidebar');
+    console.log('Before restart -- Posit Assistant: tabSet1, Help: sidebar');
+
+    // --- Phase 2: Shutdown and relaunch ---
+    // The per-spec config dir survives shutdown (cleanup is sandbox-wide in
+    // globalTeardown), so relaunch can reuse it to load the prefs we just wrote.
+    console.log('Shutting down RStudio...');
+    await shutdownRStudio(session);
+
+    console.log('Relaunching RStudio (reusing config root for persistence)...');
+    session = await launchRStudio(session.configRoot);
+    const page2 = session.page;
+
+    // --- Phase 3: Verify persistence ---
+    const chatAfterRestart = await findTabLocation(page2, '#rstudio_workbench_tab_posit_assistant');
+    const helpAfterRestart = await findTabLocation(page2, '#rstudio_workbench_tab_help');
+    console.log(`After restart — Posit Assistant: ${chatAfterRestart}, Help: ${helpAfterRestart}`);
+    expect(chatAfterRestart).toBe('tabSet1');
+    expect(helpAfterRestart).toBe('sidebar');
+
+    // --- Cleanup: restore defaults (Posit Assistant → sidebar, Help → TabSet2) ---
+    await openPaneLayoutOptions(page2);
+    await moveTab(page2, 'Posit Assistant', LAYOUT_RIGHT_TOP, LAYOUT_SIDEBAR);
+    await moveTab(page2, 'Help', LAYOUT_SIDEBAR, LAYOUT_RIGHT_BOTTOM);
+
+    await page2.locator(OPTIONS_OK).click();
+    await expect(page2.locator(OPTIONS_OK)).toBeHidden({ timeout: 15000 });
+
+    await shutdownRStudio(session);
+  });
+});

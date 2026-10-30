@@ -1,0 +1,313 @@
+/*
+ * AceEditorPreview.java
+ *
+ * Copyright (C) 2022 by Posit Software, PBC
+ *
+ * Unless you have received this program directly from Posit Software pursuant
+ * to the terms of a commercial license agreement with Posit Software, then
+ * this program is licensed to you under the terms of version 3 of the
+ * GNU Affero General Public License. This program is distributed WITHOUT
+ * ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+ * AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+ *
+ */
+package org.rstudio.studio.client.workbench.prefs.views;
+
+import org.rstudio.core.client.ExternalJavaScriptLoader;
+import org.rstudio.core.client.ExternalJavaScriptLoader.Callback;
+import org.rstudio.core.client.theme.ThemeFonts;
+import org.rstudio.core.client.dom.DocumentEx;
+import org.rstudio.core.client.dom.WindowEx;
+import org.rstudio.core.client.widget.DynamicIFrame;
+import org.rstudio.core.client.widget.FontSizer;
+import org.rstudio.studio.client.application.Desktop;
+import org.rstudio.studio.client.workbench.prefs.PrefsConstants;
+import org.rstudio.studio.client.workbench.views.source.editors.text.ace.AceResources;
+
+import com.google.gwt.core.client.GWT;
+import com.google.gwt.core.client.Scheduler;
+import com.google.gwt.dom.client.BodyElement;
+import com.google.gwt.dom.client.DivElement;
+import com.google.gwt.dom.client.Document;
+import com.google.gwt.dom.client.Element;
+import com.google.gwt.dom.client.LinkElement;
+import com.google.gwt.dom.client.Style;
+import com.google.gwt.dom.client.Style.BorderStyle;
+import com.google.gwt.dom.client.Style.Unit;
+import com.google.gwt.dom.client.StyleElement;
+import com.google.gwt.resources.client.ClientBundle;
+import com.google.gwt.resources.client.TextResource;
+
+public class AceEditorPreview extends DynamicIFrame
+{
+   public AceEditorPreview(String code)
+   {
+      super(constants_.editorThemePreview());
+      code_ = code;
+      Style style = getStyleElement().getStyle();
+      style.setBorderStyle(BorderStyle.NONE);
+   }
+
+   @Override
+   protected void onFrameLoaded()
+   {
+      isFrameLoaded_ = true;
+      final Document doc = getDocument();
+      
+      // NOTE: There is an interesting 'feature' in Firefox whereby an
+      // initialized IFrame will report that it has successfully initialized the
+      // window / underlying document (readyState is 'complete') but, in fact,
+      // there is still some initialization left to occur and any changes made
+      // before complete initialization will cause it to be swept out from under
+      // our feet. To work around this, we double-check that the document we are
+      // working with is the _same document_ after each JavaScript load
+      // iteration.
+      new ExternalJavaScriptLoader(getDocument(), AceResources.INSTANCE.acejs().getSafeUri().asString())
+            .addCallback(new Callback()
+      {
+         public void onLoaded()
+         {
+            // Bail if the preview was detached while ace.js was loading
+            // (Global Options dismissed, pane relayout, etc.) -- getDocument()
+            // here goes through getWindow().getDocument() and a detached frame
+            // has a null contentWindow, so the JSNI body would raise an
+            // uncaught "Cannot read properties of null (reading 'document')"
+            // TypeError that surfaces as an Error dialog.
+            if (!isAttached())
+               return;
+
+            if (getDocument() != doc)
+            {
+               onFrameLoaded();
+               return;
+            }
+
+            new ExternalJavaScriptLoader(getDocument(), AceResources.INSTANCE.acesupportjs().getSafeUri().asString())
+                  .addCallback(new Callback()
+                  {
+                     public void onLoaded()
+                     {
+                        // Same detached-frame guard as the outer callback:
+                        // acesupport.js can finish loading after the preview
+                        // has been removed from the DOM.
+                        if (!isAttached())
+                           return;
+
+                        if (getDocument() != doc)
+                        {
+                           onFrameLoaded();
+                           return;
+                        }
+
+                        final Document doc = getDocument();
+                        final BodyElement body = doc.getBody();
+                        
+                        if (themeUrl_ != null)
+                           setTheme(themeUrl_);
+                        if (fontSize_ != null)
+                           setFontSize(fontSize_);
+                        if (zoomLevel_ != null)
+                           setZoomLevel(zoomLevel_);
+
+                        doc.getHead().getParentElement().setLang("en"); // accessibility requirement
+
+                        body.getStyle().setMargin(0, Unit.PX);
+                        body.getStyle().setBackgroundColor("transparent");
+
+                        StyleElement style = doc.createStyleElement();
+                        style.setType("text/css");
+                        style.setInnerText(
+                              ".ace_editor {\n" +
+                                    "border: none !important;\n" +
+                                    "line-height: " + lineHeight_ + "%;\n" +
+                              "}");
+                        if (Desktop.isDesktop())
+                           setFont(ThemeFonts.getFixedWidthFont(), false);
+                        else if (webFont_ != null)
+                           setFont(webFont_, true);
+                        body.appendChild(style);
+
+                        DivElement div = doc.createDivElement();
+                        div.setId("editor");
+                        div.getStyle().setWidth(100, Unit.PCT);
+                        div.getStyle().setHeight(100, Unit.PCT);
+                        div.setInnerText(code_);
+                        body.appendChild(div);
+
+                        FontSizer.injectStylesIntoDocument(doc);
+                        FontSizer.applyNormalFontSize(div);
+                        
+                        body.appendChild(doc.createScriptElement(RES.loader().getText()));
+                        
+                        // Give Ace some time to load, then set line height.
+                        if (lineHeight_ != null)
+                        {
+                           Scheduler.get().scheduleFixedDelay(() ->
+                           {
+                              // Stop if the preview was detached before this
+                              // timer fired (e.g. the preferences dialog was
+                              // closed, or a pane relayout reparented us).
+                              // setLineHeight would otherwise dereference the
+                              // now-null iframe contentWindow and raise an
+                              // uncaught exception.
+                              if (!isAttached())
+                                 return false;
+
+                              if (div.hasClassName("ace_editor"))
+                              {
+                                 setLineHeight(lineHeight_);
+                                 return false;
+                              }
+                              else
+                              {
+                                 return true;
+                              }
+
+                           }, 100);
+                        }
+                     }
+                  });
+         }
+      });
+   }
+
+   public void setTheme(String themeUrl)
+   {
+      themeUrl_ = themeUrl;
+      if (!isFrameLoaded_ || !isAttached())
+         return;
+
+      WindowEx window = getWindow();
+      if (window == null)
+         return;
+      DocumentEx doc = window.getDocument();
+      if (doc == null)
+         return;
+
+      if (currentStyleLink_ != null)
+         currentStyleLink_.removeFromParent();
+
+      currentStyleLink_ = doc.createLinkElement();
+      currentStyleLink_.setRel("stylesheet");
+      currentStyleLink_.setType("text/css");
+      currentStyleLink_.setHref(themeUrl);
+      doc.getBody().appendChild(currentStyleLink_);
+   }
+
+   public void setFontSize(double fontSize)
+   {
+      fontSize_ = fontSize;
+      if (!isFrameLoaded_ || !isAttached())
+         return;
+
+      WindowEx window = getWindow();
+      if (window == null)
+         return;
+      DocumentEx doc = window.getDocument();
+      if (doc == null)
+         return;
+
+      if (zoomLevel_ == null)
+         FontSizer.setNormalFontSize(doc, fontSize_, lineHeight_);
+      else
+         FontSizer.setNormalFontSize(doc, fontSize_ * zoomLevel_, lineHeight_);
+   }
+   
+   public void setLineHeight(double lineHeight)
+   {
+      lineHeight_ = lineHeight;
+      if (!isFrameLoaded_)
+         return;
+
+      // Defensive: this is reachable from a deferred timer (see onFrameLoaded),
+      // by which point the frame may be detached -- its contentWindow null, or
+      // the window present but its document not yet/no longer available. Either
+      // dereference would raise an uncaught TypeError.
+      WindowEx window = getWindow();
+      if (window == null)
+         return;
+
+      DocumentEx doc = window.getDocument();
+      if (doc == null)
+         return;
+
+      Element editorEl = doc.getElementById("editor");
+      if (editorEl == null)
+         return;
+
+      editorEl.getStyle().setLineHeight(lineHeight, Unit.PCT);
+   }
+
+   public void setFont(String font, boolean webFont)
+   {
+      final String STYLE_EL_ID = "__rstudio_font_family";
+      final String LINK_EL_ID = "__rstudio_font_link";
+      if (!isAttached())
+         return;
+      WindowEx window = getWindow();
+      if (window == null)
+         return;
+      DocumentEx document = window.getDocument();
+      if (document == null)
+         return;
+
+      Element oldStyle = document.getElementById(STYLE_EL_ID);
+      Element oldLink = document.getElementById(LINK_EL_ID);
+      
+      if (webFont)
+      {
+         LinkElement link = document.createLinkElement();
+         link.setRel("stylesheet");
+         link.setHref("fonts/css/" + font + ".css");
+         link.setId(LINK_EL_ID);
+         document.getHead().appendChild(link);
+         webFont_ = font;
+      }
+
+      String quotedFont = font.startsWith("\"") && font.endsWith("\"") ? font : "\"" + font + "\"";
+      StyleElement style = document.createStyleElement();
+      style.setAttribute("type", "text/css");
+      style.setInnerText(".ace_editor, .ace_text-layer {\n" +
+                         "font-family: " + quotedFont + ", monospace !important;\n" +
+                         "}");
+
+      document.getBody().appendChild(style);
+
+      if (oldStyle != null)
+         oldStyle.removeFromParent();
+      if (oldLink != null)
+         oldLink.removeFromParent();
+
+      style.setId(STYLE_EL_ID);
+   }
+
+   public void setZoomLevel(double zoomLevel)
+   {
+      zoomLevel_ = zoomLevel;
+      if (!isFrameLoaded_)
+         return;
+      
+      if (fontSize_ != null)
+         setFontSize(fontSize_);
+   }
+   
+   private LinkElement currentStyleLink_;
+   private boolean isFrameLoaded_;
+   private String themeUrl_;
+   private String webFont_;
+   private Double fontSize_;
+   private Double lineHeight_;
+   private Double zoomLevel_;
+   private final String code_;
+   
+   public interface Resources extends ClientBundle
+   {
+      @Source("AceEditorPreview.js")
+      TextResource loader();
+   }
+
+   private static Resources RES = GWT.create(Resources.class);
+
+   private static final PrefsConstants constants_ = GWT.create(PrefsConstants.class);
+}

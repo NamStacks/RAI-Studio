@@ -1,0 +1,8 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "rai-audit",
+  "version": "0.1.0",
+  "description": "Session-scoped evidence-led RAI-Studio audit skill",
+  "author": { "name": "RAI-Studio" },
+  "skills": ["./"]
+}

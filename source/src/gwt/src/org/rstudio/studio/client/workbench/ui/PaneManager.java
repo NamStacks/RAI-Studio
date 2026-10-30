@@ -1,0 +1,3262 @@
+/*
+ * PaneManager.java
+ *
+ * Copyright (C) 2022 by Posit Software, PBC
+ *
+ * Unless you have received this program directly from Posit Software pursuant
+ * to the terms of a commercial license agreement with Posit Software, then
+ * this program is licensed to you under the terms of version 3 of the
+ * GNU Affero General Public License. This program is distributed WITHOUT
+ * ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+ * AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+ *
+ */
+package org.rstudio.studio.client.workbench.ui;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+
+import org.rstudio.core.client.CommandWithArg;
+import org.rstudio.core.client.Debug;
+import org.rstudio.core.client.JsArrayUtil;
+import org.rstudio.core.client.MathUtil;
+import org.rstudio.core.client.StringUtil;
+import org.rstudio.core.client.Triad;
+import org.rstudio.core.client.command.AppCommand;
+import org.rstudio.core.client.command.CommandBinder;
+import org.rstudio.core.client.command.Handler;
+import org.rstudio.core.client.dom.DomUtils;
+import org.rstudio.core.client.events.ManageLayoutCommandsEvent;
+import org.rstudio.core.client.events.WindowEnsureVisibleEvent;
+import org.rstudio.core.client.events.WindowStateChangeEvent;
+import org.rstudio.core.client.files.FileSystemItem;
+import org.rstudio.core.client.js.JsObject;
+import org.rstudio.core.client.layout.DualWindowLayoutPanel;
+import org.rstudio.core.client.layout.LogicalWindow;
+import org.rstudio.core.client.layout.WindowState;
+import org.rstudio.core.client.theme.MinimizedModuleTabLayoutPanel;
+import org.rstudio.core.client.theme.MinimizedWindowFrame;
+import org.rstudio.core.client.theme.PrimaryWindowFrame;
+import org.rstudio.core.client.theme.WindowFrame;
+import org.rstudio.core.client.theme.res.ThemeResources;
+import org.rstudio.core.client.widget.ToolbarButton;
+import org.rstudio.studio.client.application.events.EventBus;
+import org.rstudio.studio.client.common.GlobalDisplay;
+import org.rstudio.studio.client.common.filetypes.FileTypeRegistry;
+import org.rstudio.studio.client.workbench.commands.Commands;
+import org.rstudio.studio.client.workbench.events.ZoomPaneEvent;
+import org.rstudio.studio.client.workbench.model.ClientState;
+import org.rstudio.studio.client.workbench.model.Session;
+import org.rstudio.studio.client.workbench.model.helper.IntStateValue;
+import org.rstudio.studio.client.workbench.model.helper.JSObjectStateValue;
+import org.rstudio.studio.client.workbench.prefs.events.UserPrefsChangedEvent;
+import org.rstudio.studio.client.workbench.prefs.model.UserPrefs;
+import org.rstudio.studio.client.workbench.prefs.model.UserPrefsAccessor;
+import org.rstudio.studio.client.workbench.prefs.views.PaneLayoutPreferencesPane;
+import org.rstudio.studio.client.workbench.views.chat.PaiUtil;
+import org.rstudio.studio.client.workbench.views.chat.events.ChatPaneActiveEvent;
+import org.rstudio.studio.client.projects.ui.prefs.events.ProjectOptionsChangedEvent;
+import org.rstudio.studio.client.workbench.views.console.ConsoleConstants;
+import org.rstudio.studio.client.workbench.views.console.ConsoleInterpreterVersion;
+import org.rstudio.studio.client.workbench.views.console.ConsolePane;
+import org.rstudio.studio.client.workbench.views.output.find.FindOutputTab;
+import org.rstudio.studio.client.workbench.views.output.markers.MarkersOutputTab;
+import org.rstudio.studio.client.workbench.views.source.Source;
+import org.rstudio.studio.client.workbench.views.source.SourceColumn;
+import org.rstudio.studio.client.workbench.views.source.SourceColumnManager;
+import org.rstudio.studio.client.workbench.views.source.SourceColumnManager.ColumnName;
+import org.rstudio.studio.client.workbench.views.source.SourceWindowManager;
+import org.rstudio.studio.client.workbench.views.source.editors.EditingTarget;
+import org.rstudio.studio.client.workbench.views.source.model.SourceDocument;
+
+import com.google.gwt.core.client.GWT;
+import com.google.gwt.core.client.JsArray;
+import com.google.gwt.core.client.JsArrayString;
+import com.google.gwt.core.client.JavaScriptObject;
+import com.google.gwt.core.client.Scheduler;
+import com.google.gwt.core.client.Scheduler.ScheduledCommand;
+import com.google.gwt.dom.client.Element;
+import com.google.gwt.layout.client.Layout.AnimationCallback;
+import com.google.gwt.layout.client.Layout.Layer;
+import com.google.gwt.user.client.Command;
+import com.google.gwt.user.client.Timer;
+import com.google.gwt.user.client.Window;
+import com.google.gwt.user.client.ui.SplitterResizedEvent;
+import com.google.gwt.user.client.ui.Widget;
+import com.google.inject.Inject;
+import com.google.inject.Provider;
+import com.google.inject.Singleton;
+import com.google.inject.name.Named;
+
+import elemental2.dom.DomGlobal;
+
+@Singleton
+public class PaneManager
+{
+   public interface Binder extends CommandBinder<Commands, PaneManager> {}
+
+   public enum Tab {
+      History, Files, Plots, Packages, Help, VCS, Tutorial, Build, Connections,
+      Presentation, Presentations, Environment, Viewer, Source, Console, SourceColumn, Chat
+   }
+
+   public static final String LEFT_COLUMN = "left";
+   public static final String RIGHT_COLUMN = "right";
+   public static final String SIDEBAR_COLUMN = "sidebar";
+
+   class SelectedTabStateValue extends IntStateValue
+   {
+      SelectedTabStateValue(String name,
+                            WorkbenchTabPanel tabPanel)
+      {
+         super("workbench-pane", name, ClientState.PROJECT_PERSISTENT,
+               session_.getSessionInfo().getClientState(), true);
+         tabPanel_ = tabPanel;
+         finishInit(session_.getSessionInfo().getClientState());
+      }
+
+      @Override
+      protected void onInit(Integer value)
+      {
+         if (value != null && tabPanel_.getWidgetCount() > 0)
+            tabPanel_.selectTab(value);
+      }
+
+      @Override
+      protected Integer getValue() { return tabPanel_.getSelectedIndex(); }
+
+      private final WorkbenchTabPanel tabPanel_;
+   }
+
+   private class ZoomedTabStateValue extends JSObjectStateValue
+   {
+      public ZoomedTabStateValue()
+      {
+         super("workbench-pane", "TabZoom", ClientState.PROJECT_PERSISTENT,
+               session_.getSessionInfo().getClientState(), true);
+         finishInit(session_.getSessionInfo().getClientState());
+      }
+
+      @Override
+      protected void onInit(final JsObject value)
+      {
+         if (value == null)
+            return;
+
+         if (!value.hasKey(MAXIMIZED_TAB_KEY) || !value.hasKey(WIDGET_SIZE_KEY))
+            return;
+
+         // Time-out action just to ensure all client state is ready
+         new Timer()
+         {
+            @Override
+            public void run()
+            {
+               String tabString = value.getString(MAXIMIZED_TAB_KEY);
+               double widgetSize = value.getDouble(WIDGET_SIZE_KEY);
+
+               maximizedTab_ = Tab.valueOf(tabString);
+               maximizedWindow_ = getWindowForTab(maximizedTab_);
+               widgetSizePriorToZoom_ = widgetSize;
+               fullyMaximizeWindow(maximizedWindow_, maximizedTab_);
+               manageLayoutCommands();
+            }
+         }.schedule(200);
+      }
+
+      @Override
+      protected boolean hasChanged()
+      {
+         if (lastValue_ == null)
+            return true;
+
+         JsObject oldValue = lastValue_;
+         JsObject newValue = getValue();
+
+         boolean oldHasKey = oldValue.hasKey(MAXIMIZED_TAB_KEY);
+         boolean newHasKey = newValue.hasKey(MAXIMIZED_TAB_KEY);
+
+         if (oldHasKey && newHasKey)
+            return !StringUtil.equals(oldValue.getString(MAXIMIZED_TAB_KEY),
+                   newValue.getString(MAXIMIZED_TAB_KEY));
+
+         return oldHasKey != newHasKey;
+      }
+
+      @Override
+      protected JsObject getValue()
+      {
+         final JsObject object = JsObject.createJsObject();
+         if (maximizedTab_ != null)
+            object.setString(MAXIMIZED_TAB_KEY, maximizedTab_.toString());
+
+         if (widgetSizePriorToZoom_ >= 0)
+            object.setDouble(WIDGET_SIZE_KEY, widgetSizePriorToZoom_);
+
+         lastValue_ = object;
+         return object;
+      }
+
+      private static final String MAXIMIZED_TAB_KEY = "MaximizedTab";
+      private static final String WIDGET_SIZE_KEY = "WidgetSize";
+
+      private JsObject lastValue_ = null;
+
+   }
+
+   private LogicalWindow getWindowForTab(Tab tab)
+   {
+      switch (tab)
+      {
+      case Console: return getConsoleLogicalWindow();
+      case Source:  return getSourceLogicalWindow();
+      default:      return getOwnerTabPanel(tab).getParentWindow();
+      }
+   }
+
+   @Inject
+   public PaneManager(Provider<MainSplitPanel> pSplitPanel,
+                      EventBus eventBus,
+                      Session session,
+                      Binder binder,
+                      Commands commands,
+                      UserPrefs userPrefs,
+                      PaiUtil paiUtil,
+                      @Named(CONSOLE_PANE) final Widget consolePane,
+                      FileTypeRegistry fileTypeRegistry,
+                      Source source,
+                      SourceColumnManager sourceColumnManager,
+                      @Named(HISTORY_PANE) final WorkbenchTab historyTab,
+                      @Named(FILES_PANE) final WorkbenchTab filesTab,
+                      @Named(PLOTS_PANE) final WorkbenchTab plotsTab,
+                      @Named(PACKAGES_PANE) final WorkbenchTab packagesTab,
+                      @Named(HELP_PANE) final WorkbenchTab helpTab,
+                      @Named(VCS_PANE) final WorkbenchTab vcsTab,
+                      @Named(BUILD_PANE) final WorkbenchTab buildTab,
+                      @Named(PRESENTATION_PANE) final WorkbenchTab presentationTab,
+                      @Named(PRESENTATIONS_PANE) final WorkbenchTab presentation2Tab,
+                      @Named(CONNECTIONS_PANE) final WorkbenchTab connectionsTab,
+                      @Named(ENVIRONMENT_PANE) final WorkbenchTab environmentTab,
+                      @Named(VIEWER_PANE) final WorkbenchTab viewerTab,
+                      @Named(COMPILE_PDF_PANE) final WorkbenchTab compilePdfTab,
+                      @Named(SOURCE_CPP_PANE) final WorkbenchTab sourceCppTab,
+                      @Named(RMARKDOWN_PANE) final WorkbenchTab renderRmdTab,
+                      @Named(DEPLOY_PANE) final WorkbenchTab deployContentTab,
+                      @Named(TERMINAL_PANE) final WorkbenchTab terminalTab,
+                      @Named(TESTS_PANE) final WorkbenchTab testsTab,
+                      @Named(JOBS_PANE) final WorkbenchTab jobsTab,
+                      @Named(LAUNCHER_PANE) final WorkbenchTab launcherJobsTab,
+                      @Named(DATA_OUTPUT_PANE) final WorkbenchTab dataTab,
+                      @Named(TUTORIAL_PANE) final WorkbenchTab tutorialTab,
+                      @Named(CHAT_PANE) final WorkbenchTab chatTab,
+                      final MarkersOutputTab markersTab,
+                      final FindOutputTab findOutputTab,
+                      OptionsLoader.Shim optionsLoader,
+                      Provider<GlobalDisplay> pGlobalDisplay)
+   {
+      eventBus_ = eventBus;
+      session_ = session;
+      commands_ = commands;
+      userPrefs_ = userPrefs;
+      paiUtil_ = paiUtil;
+      consolePane_ = (ConsolePane)consolePane;
+      fileTypeRegistry_ = fileTypeRegistry;
+      source_ = source;
+      sourceColumnManager_ = sourceColumnManager;
+      historyTab_ = historyTab;
+      filesTab_ = filesTab;
+      plotsTab_ = plotsTab;
+      packagesTab_ = packagesTab;
+      helpTab_ = helpTab;
+      vcsTab_ = vcsTab;
+      buildTab_ = buildTab;
+      presentationTab_ = presentationTab;
+      presentation2Tab_ = presentation2Tab;
+      connectionsTab_ = connectionsTab;
+      environmentTab_ = environmentTab;
+      viewerTab_ = viewerTab;
+      compilePdfTab_ = compilePdfTab;
+      findOutputTab_ = findOutputTab;
+      sourceCppTab_ = sourceCppTab;
+      renderRmdTab_ = renderRmdTab;
+      deployContentTab_ = deployContentTab;
+      markersTab_ = markersTab;
+      terminalTab_ = terminalTab;
+      jobsTab_ = jobsTab;
+      launcherJobsTab_ = launcherJobsTab;
+      optionsLoader_ = optionsLoader;
+      testsTab_ = testsTab;
+      dataTab_ = dataTab;
+      tutorialTab_ = tutorialTab;
+      chatTab_ = chatTab;
+      pGlobalDisplay_ = pGlobalDisplay;
+
+      binder.bind(commands, this);
+      source_.load();
+
+      PaneConfig config = validateConfig(userPrefs.panes().getValue().cast());
+      config = normalizeAssistantLayout(config);
+      previousPaneConfig_ = config;
+      initPanes(config);
+
+      int splitterSize = 7;
+
+      panes_ = createPanes(config);
+      center_ = createSplitWindow(panes_.get(0), panes_.get(1), LEFT_COLUMN, 0.4, splitterSize);
+      right_ = createSplitWindow(panes_.get(2), panes_.get(3), RIGHT_COLUMN, 0.6, splitterSize);
+      panel_ = pSplitPanel.get();
+
+      // get the widgets for the extra source columns to be displayed
+      additionalSourceCount_ = userPrefs_.panes().getValue().getAdditionalSourceColumns();
+      if (additionalSourceCount_ != sourceColumnManager_.getSize() - 1)
+         syncAdditionalColumnCount(additionalSourceCount_, false /* refreshDisplay */);
+      if (additionalSourceCount_ > 0)
+      {
+         if (userPrefs_.allowSourceColumns().getGlobalValue())
+         {
+            for (int i = 0; i < sourceColumnManager_.getSize(); i++)
+            {
+               String name = sourceColumnManager_.get(i).getName();
+               String accessibleName = sourceColumnManager_.get(i).getAccessibleName();
+               if (!StringUtil.equals(name, SourceColumnManager.MAIN_SOURCE_NAME))
+                  leftList_.add(0, createSourceColumnWindow(name, accessibleName));
+            }
+         }
+         else
+         {
+            sourceColumnManager_.consolidateColumns(0);
+            PaneConfig paneConfig = getCurrentConfig();
+            userPrefs_.panes().setGlobalValue(PaneConfig.create(
+               JsArrayUtil.copy(paneConfig.getQuadrants()),
+               paneConfig.getTabSet1(),
+               paneConfig.getTabSet2(),
+               paneConfig.getHiddenTabSet(),
+               paneConfig.getConsoleLeftOnTop(),
+               paneConfig.getConsoleRightOnTop(),
+               0,
+               paneConfig.getSidebar(),
+               paneConfig.getSidebarVisible(),
+               paneConfig.getSidebarLocation()).cast());
+         }
+      }
+      // Initialize sidebar if configured
+      Widget sidebarWidget = null;
+      String sidebarLocation = config.getSidebarLocation();
+      if (config.getSidebarVisible())
+      {
+         LogicalWindow sidebarWindow = panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR);
+         if (sidebarWindow != null)
+         {
+            // For sidebar, we use just the WindowFrame directly (no vertical split)
+            // State already set in initPanes, but ensure it's NORMAL if visible
+            if (sidebarWindow.getState() != WindowState.NORMAL)
+               sidebarWindow.transitionToState(WindowState.NORMAL);
+            sidebarWidget = sidebarWindow.getNormal();
+            sidebar_ = sidebarWidget;
+         }
+      }
+
+      // panel_.initialize() must run BEFORE showSidebar(): showSidebar() calls
+      // manageZoomColumnCommands() which reads widget sizes from the panel via
+      // getWidgetSize() -- those are only available after the panel has added
+      // its child widgets.
+      panel_.initialize(leftList_, center_, right_, sidebarWidget, sidebarLocation);
+      showSidebar(config.getSidebarVisible());
+
+      if (sidebar_ != null)
+      {
+         // Apply exclusive cover mode once the initial layout has settled --
+         // right_'s startup width isn't reliable to read until after this.
+         Scheduler.get().scheduleDeferred(new ScheduledCommand()
+         {
+            public void execute()
+            {
+               // Guard against a user toggling the sidebar off before this
+               // deferred command fires.
+               if (sidebar_ != null && shouldCoverRightColumn())
+                  coverRightColumn();
+            }
+         });
+      }
+
+      for (LogicalWindow window : sourceLogicalWindows_)
+      {
+         // count the number of source docs assigned to this window
+         JsArray<SourceDocument> docs =
+            session_.getSessionInfo().getSourceDocuments();
+         String windowId = SourceWindowManager.getSourceWindowId();
+         int numDocs = 0;
+         for (int i = 0; i < docs.length(); i++)
+         {
+            String docWindowId = docs.get(i).getSourceWindowId();
+
+            // Check the SourceColumn of the SourceDocument. If for some reason we cannot find
+            // its column, default to the main source window.
+            SourceColumn column =
+               sourceColumnManager_.getByName(docs.get(i).getSourceDisplayName());
+            boolean mainSourceWindow = (column == null ||
+               StringUtil.equals(column.getName(), SourceColumnManager.MAIN_SOURCE_NAME)) ?
+               true : false;
+
+            LogicalWindow columnWindow = mainSourceWindow ?
+                                         sourceLogicalWindows_.get(0) :
+                                         getParentLogicalWindow(column.asWidget().getElement());
+
+            if (StringUtil.equals(docWindowId, windowId) &&
+                (columnWindow == null && mainSourceWindow ||
+                 window == columnWindow))
+            {
+               numDocs++;
+            }
+         }
+
+         if (numDocs == 0 && window.getState() != WindowState.HIDE)
+         {
+            window.onWindowStateChange(
+                  new WindowStateChangeEvent(WindowState.HIDE));
+         }
+         else if (numDocs > 0 && window.getState() == WindowState.HIDE)
+         {
+            window.onWindowStateChange(
+                  new WindowStateChangeEvent(WindowState.NORMAL));
+         }
+      }
+
+      source_.loadDisplay();
+      
+      userPrefs.panes().addValueChangeHandler(evt ->
+      {
+         PaneConfig newConfig = validateConfig(evt.getValue().cast());
+
+         // Short-circuit: if the config hasn't actually changed, skip everything.
+         if (previousPaneConfig_ != null && previousPaneConfig_.isEqualTo(newConfig))
+            return;
+
+         // Short-circuit: if only sidebar visibility changed, skip the full
+         // pane layout rebuild (replaceWindows, tab panel clear/repopulate).
+         if (previousPaneConfig_ != null &&
+             previousPaneConfig_.isOnlySidebarVisibilityChange(newConfig))
+         {
+            previousPaneConfig_ = newConfig;
+            showSidebar(newConfig.getSidebarVisible());
+            manageLayoutCommands();
+            return;
+         }
+
+         previousPaneConfig_ = newConfig;
+
+         ArrayList<LogicalWindow> newPanes = createPanes(newConfig);
+         panes_ = newPanes;
+         center_.replaceWindows(newPanes.get(0), newPanes.get(1));
+         right_.replaceWindows(newPanes.get(2), newPanes.get(3));
+
+         tabs1_ = tabNamesToTabs(newConfig.getTabSet1());
+         tabs2_ = tabNamesToTabs(newConfig.getTabSet2());
+
+         WindowState oldTabSet1State = panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET1).getState();
+         WindowState oldTabSet2State = panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET2).getState();
+         WindowState tabSet1State = setWindowStateOnTabChange(panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET1),
+         tabSet1TabPanel_, tabs1_);
+         WindowState tabSet2State = setWindowStateOnTabChange(panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET2),
+            tabSet2TabPanel_, tabs2_);
+
+         // Additional checks when tab set panes are in the same column and either has had a
+         // state change
+         if (getCurrentConfig().getTabSet1Left() == getCurrentConfig().getTabSet2Left() &&
+             (oldTabSet1State != tabSet1State || oldTabSet2State != tabSet2State))
+         {
+            if (tabSet1State == WindowState.MINIMIZE &&
+                tabSet2State == WindowState.MINIMIZE)
+            {
+               double rightTargetSize = 0.0;
+               if (getCurrentConfig().getTabSet1Left())
+                  rightTargetSize = right_.getOffsetWidth() + center_.getOffsetWidth();
+               resizeHorizontally(rightTargetSize, panel_.getLeftWidgetSizes());
+            }
+            else if (center_.getOffsetWidth() == 0 || right_.getOffsetWidth() == 0)
+               resizeHorizontally(panel_.getDefaultSplitterWidth(), panel_.getLeftWidgetSizes());
+         }
+
+         populateTabPanel(tabs1_, tabSet1TabPanel_, tabSet1MinPanel_);
+         populateTabPanel(tabs2_, tabSet2TabPanel_, tabSet2MinPanel_);
+         hiddenTabs_ = tabNamesToTabs(newConfig.getHiddenTabSet());
+         populateTabPanel(hiddenTabs_, hiddenTabSetTabPanel_, hiddenTabSetMinPanel_);
+
+         // manage sidebar
+         showSidebar(newConfig.getSidebarVisible());
+
+         // manage source column commands
+         boolean visible = userPrefs.allowSourceColumns().getValue() &&
+            (userPrefs.panes().getValue().getAdditionalSourceColumns() < MAX_COLUMN_COUNT);
+
+         commands_.newSourceColumn().setVisible(visible);
+         commands_.openSourceDocNewColumn().setVisible(visible);
+
+         manageLayoutCommands();
+         manageChatCommands();
+      });
+
+      eventBus_.addHandler(ZoomPaneEvent.TYPE, event ->
+      {
+         String pane = event.getPane();
+         LogicalWindow window = panesByName_.get(pane);
+         assert window != null :
+            "No pane with name '" + pane + "'";
+
+         toggleWindowZoom(window, tabForName(event.getTab()));
+      });
+
+      eventBus_.addHandler(WindowEnsureVisibleEvent.TYPE, event ->
+      {
+         final LogicalWindow window = getLogicalWindow(event.getWindowFrame());
+         if (window == null)
+            return;
+
+         // If we're currently zooming a pane, and we're now ensuring
+         // a separate window is visible (e.g. a pane raising itself),
+         // then transfer zoom to that window.
+         // BUT: don't transfer zoom to an empty source window, as that corrupts the zoom state
+         if (maximizedWindow_ != null && !maximizedWindow_.equals(window))
+         {
+            // Check if the target window is an empty source window
+            if (sourceLogicalWindows_.contains(window))
+            {
+               int sourceIndex = sourceLogicalWindows_.indexOf(window);
+               int tabCount = sourceColumnManager_.get(sourceIndex).getTabCount();
+               if (tabCount == 0)
+               {
+                  return;
+               }
+            }
+
+            fullyMaximizeWindow(window, lastSelectedTab_);
+            return;
+         }
+
+         Double width = Double.valueOf(window.getActiveWidget().getOffsetWidth());
+
+         // If the widget is already visible horizontally, then bail
+         // (other logic handles vertical visibility)
+         if (width > 0)
+            return;
+
+         // Attempt to change the widths of as few columns as possible
+         ArrayList<Widget> columns = new ArrayList<>();
+         columns.add(right_);
+         columns.add(center_);
+         columns.addAll(leftList_);
+
+         ArrayList<Double> sizes = getValidColumnWidths(columns, false);
+         final Command afterAnimation = () -> window.getNormal().onResize();
+
+         double rightEnd = sizes.get(0);
+         ArrayList<Double> leftTargets = new ArrayList<>();
+         if (sizes.size() > 2)
+            leftTargets.addAll(sizes.subList(2, sizes.size()));
+
+         resizeHorizontally(rightEnd, leftTargets, afterAnimation);
+      });
+
+      eventBus_.addHandler(
+            ManageLayoutCommandsEvent.TYPE,
+            event -> manageLayoutCommands());
+
+      eventBus.addHandler(UserPrefsChangedEvent.TYPE, new UserPrefsChangedEvent.Handler()
+      {
+         @Override
+         public void onUserPrefsChanged(UserPrefsChangedEvent e)
+         {
+            if (!userPrefs_.showPanelFocusRectangle().getValue())
+            {
+               clearFocusIndicator();
+            }
+         }
+      });
+
+      // highlight pane containing keyboard focus
+      DomGlobal.document.addEventListener("focusin", (Event) ->
+      {
+         if (!userPrefs_.showPanelFocusRectangle().getValue())
+         {
+            clearFocusIndicator();
+            return;
+         }
+
+         Element activeEl = DomUtils.getActiveElement();
+         if (activeEl == null)
+         {
+            clearFocusIndicator();
+            return;
+         }
+
+         LogicalWindow activeWindow = getParentLogicalWindow(activeEl);
+         if (activeWindow == lastFocusedWindow_)
+            return;
+         if (activeWindow == null)
+         {
+            clearFocusIndicator();
+            return;
+         }
+
+         if (lastFocusedWindow_ != null)
+            lastFocusedWindow_.showWindowFocusIndicator(false);
+         lastFocusedWindow_ = activeWindow;
+         activeWindow.showWindowFocusIndicator(true);
+      });
+
+      // Re-evaluate chat command visibility when the chat provider changes
+      userPrefs.chatProvider().addValueChangeHandler(event -> manageChatCommands());
+      eventBus.addHandler(ProjectOptionsChangedEvent.TYPE, event ->
+      {
+         paiUtil_.updateProjectOptions(event.getData().getAssistantOptions());
+         manageChatCommands();
+      });
+
+      manageLayoutCommands();
+      manageChatCommands();
+
+      new ZoomedTabStateValue();
+
+      // Fire initial chat pane state so the toolbar button latches correctly
+      // on startup. Deferred so all event handlers are registered first.
+      Scheduler.get().scheduleDeferred(() ->
+            eventBus_.fireEvent(new ChatPaneActiveEvent(isChatActivatedInSidebar())));
+   }
+
+   LogicalWindow getLogicalWindow(WindowFrame frame)
+   {
+      for (LogicalWindow window : panes_)
+         if (window.getNormal() == frame)
+            return window;
+      for (LogicalWindow window : sourceLogicalWindows_)
+         if (window.getNormal() == frame)
+            return window;
+
+      return null;
+   }
+
+   LogicalWindow getParentLogicalWindow(Element el)
+   {
+      LogicalWindow targetWindow = null;
+      ArrayList<LogicalWindow> windowList = new ArrayList<>(panes_);
+      windowList.addAll(sourceLogicalWindows_);
+
+      while (el != null && targetWindow == null)
+      {
+         el = el.getParentElement();
+         for (LogicalWindow window : windowList)
+         {
+            Widget activeWidget;
+            if (window.getState() != null)
+               activeWidget = window.getActiveWidget();
+            else
+               activeWidget = window.getNormal();
+            if (activeWidget == null)
+               continue;
+
+            Element activeEl = activeWidget.getElement();
+            if (el.equals(activeEl))
+            {
+               targetWindow = window;
+               break;
+            }
+         }
+      }
+      return targetWindow;
+   }
+
+   public LogicalWindow getActiveLogicalWindow()
+   {
+      Element activeEl = DomUtils.getActiveElement();
+      return getParentLogicalWindow(activeEl);
+   }
+
+   @Handler
+   public void onActivateConsolePane()
+   {
+      // Ensure that the console window is activated
+      LogicalWindow consoleWindow = getConsoleLogicalWindow();
+      if (consoleWindow.getState().equals(WindowState.MINIMIZE))
+      {
+         WindowStateChangeEvent event =
+               new WindowStateChangeEvent(WindowState.NORMAL);
+         consoleWindow.onWindowStateChange(event);
+      }
+
+      // The console tab panel is initialized lazily -- while a console
+      // pane will always be available, the owning tab panel will only
+      // be constructed once a neighbor (e.g. the Terminal) has been
+      // created.
+      if (consoleTabPanel_.isEmpty())
+      {
+         consolePane_.focus();
+      }
+      else
+      {
+         LogicalWindow activeWindow = getActiveLogicalWindow();
+         if (consoleWindow.equals(activeWindow))
+         {
+            consoleTabPanel_.selectNextTab();
+         }
+         else
+         {
+            consoleTabPanel_.selectTab(consoleTabPanel_.getSelectedIndex());
+         }
+      }
+   }
+
+   @Handler
+   public void onLayoutZoomConsolePane()
+   {
+      if (consoleTabPanel_.isEmpty())
+         consolePane_.focus();
+      else
+         consoleTabPanel_.selectTab(consoleTabPanel_.getSelectedIndex());
+
+      eventBus_.fireEvent(new ZoomPaneEvent(PaneManager.CONSOLE_PANE));
+   }
+
+   @Handler
+   public void onLayoutZoomCurrentPane()
+   {
+      LogicalWindow activeWindow = getActiveLogicalWindow();
+      if (activeWindow == null)
+         return;
+      toggleWindowZoom(activeWindow, null);
+   }
+
+   @Handler
+   public void onLayoutEndZoom()
+   {
+      restoreLayout();
+   }
+
+   /**
+    * End any active pane/window or column zoom, restoring the default layout;
+    * no-op when nothing is zoomed. Runs {@code onComplete} once the restore has
+    * settled (after the relayout animation completes), or immediately when
+    * nothing was zoomed.
+    *
+    * Exposed for the automation bridge (window.rstudio.layout.reset). The
+    * worker-scoped automation session means a test that zooms a pane and fails
+    * before toggling it back leaves the layout maximized, squeezing the other
+    * panes to near-zero so the next test can't reach its targets. The guard
+    * matters because restoreLayout() resets column widths to default when no
+    * window is maximized, so firing it unconditionally would clobber any custom
+    * widths a non-zoomed test set up. Pane/window zoom is tracked by
+    * maximizedWindow_ / maximizedTab_; column zoom is reflected by
+    * getZoomedColumn().
+    *
+    * Quadrants can also be maximized without PaneManager's zoom tracking ever
+    * knowing: the pane-header min/max buttons and EnsureHeightEvent.MAXIMIZED
+    * (fired e.g. when an R Notebook preview opens in the Viewer) drive the
+    * WindowFrame state machine in DualWindowLayoutPanel directly, and that
+    * state persists across sessions via client state (windowlayoutstate). So
+    * when no tracked zoom is active, restore any MAXIMIZE-state quadrant to
+    * NORMAL -- which also restores its MINIMIZE-state sibling (see
+    * DualWindowLayoutPanel.WindowStateChangeManager). HIDE/EXCLUSIVE pairs are
+    * left alone; they encode the empty-source-pane layout owned by the
+    * source-document count logic.
+    *
+    * The onComplete callback lets the bridge expose a Promise that resolves
+    * only once the relayout has finished -- the relayout flushes on a later
+    * animation frame (panel_.animate) even under reduced_motion, so a
+    * fire-and-forget reset would otherwise return before the panes settle.
+    */
+   public void endZoomIfActive(Command onComplete)
+   {
+      if (maximizedWindow_ != null ||
+          maximizedTab_ != null ||
+          getZoomedColumn() != null)
+      {
+         restoreLayout(onComplete);
+         return;
+      }
+
+      boolean restored = false;
+      for (LogicalWindow window : panes_)
+      {
+         if (window.getState() == WindowState.MAXIMIZE)
+         {
+            window.onWindowStateChange(
+                  new WindowStateChangeEvent(WindowState.NORMAL, true));
+            restored = true;
+         }
+      }
+
+      if (onComplete != null)
+      {
+         // The DualWindowLayoutPanel defers its relayout (and the client
+         // state persist) to a scheduled command, so chain the callback
+         // behind that rather than firing it synchronously.
+         if (restored)
+            Scheduler.get().scheduleDeferred(onComplete::execute);
+         else
+            onComplete.execute();
+      }
+   }
+
+   @Handler
+   public void onLayoutConsoleOnLeft()
+   {
+      if (!commands_.layoutConsoleOnLeft().isChecked())
+      {
+         PaneConfig paneConfig = getCurrentConfig();
+         int consoleTargetIndex = paneConfig.getConsoleLeftOnTop() ? 0 : 1;
+         swapConsolePane(paneConfig, consoleTargetIndex);
+      }
+   }
+
+   @Handler
+   public void onLayoutConsoleOnRight()
+   {
+      if (!commands_.layoutConsoleOnRight().isChecked())
+      {
+         PaneConfig paneConfig = getCurrentConfig();
+         int consoleTargetIndex = paneConfig.getConsoleRightOnTop() ? 2 : 3;
+         swapConsolePane(paneConfig, consoleTargetIndex);
+      }
+   }
+
+   // The following commands need to be updated to fit the new layout with additional source
+   // columns. The mismatched names/actions are temporarily intentional until this is handled.
+   @Handler
+   public void onFocusLeftSeparator()
+   {
+      center_.focusSplitter();
+   }
+
+   @Handler
+   public void onFocusRightSeparator()
+   {
+      right_.focusSplitter();
+   }
+
+   @Handler
+   public void onFocusCenterSeparator()
+   {
+      panel_.focusSplitter(right_);
+   }
+
+   @Handler
+   public void onFocusSourceColumnSeparator()
+   {
+      LogicalWindow window = getParentLogicalWindow(sourceColumnManager_.getActiveElement());
+      if (window == null ||
+          window.getNormal() == null ||
+          !window.getNormal().getName().contains(SourceColumnManager.COLUMN_PREFIX))
+      {
+         Debug.logWarning("Attempted focusSourceColumnSeparator when source column not active.");
+         return;
+      }
+      panel_.focusSplitter(window.getNormal());
+   }
+
+   @Handler
+   public void onFocusSidebarSeparator()
+   {
+      panel_.focusSplitter(sidebar_);
+   }
+
+   @Handler
+   public void onFocusNextPane()
+   {
+      LogicalWindow currentFocus = getActiveLogicalWindow();
+      if (currentFocus == null)
+         return;
+
+      focusAdjacentWindow(currentFocus, false /* before */);
+   }
+
+   @Handler
+   public void onFocusPreviousPane()
+   {
+      LogicalWindow currentFocus = getActiveLogicalWindow();
+      if (currentFocus == null)
+         return;
+
+      focusAdjacentWindow(currentFocus, true /* before */);
+   }
+
+   @Handler
+   public void onNewSourceColumn()
+   {
+      if (validateNewColumnRequest())
+         createAndDisplaySourceColumn();
+   }
+
+   @Handler
+   public void onOpenSourceDocNewColumn()
+   {
+      if (validateNewColumnRequest())
+      {
+         ColumnName name = createSourceColumn();
+         SourceColumn column = sourceColumnManager_.getByName(name.getName());
+         column.incrementNewTabPending();
+         panel_.addLeftWidget(
+            createSourceColumnWindow(name.getName(),
+               name.getAccessibleName()));
+         sourceColumnManager_.setActive(column);
+         Command onCancelled = () ->
+         {
+            column.decrementNewTabPending();
+            closeSourceWindow(name.getName());
+         };
+         Command onCompleted = () -> column.decrementNewTabPending();
+         source_.openSourceDoc(onCancelled, onCompleted);
+      }
+   }
+
+   public void openFileInNewColumn(FileSystemItem targetFile, Command onOpen)
+   {
+      if (targetFile != null && validateNewColumnRequest())
+      {
+         ColumnName name = createSourceColumn();
+         SourceColumn column = sourceColumnManager_.getByName(name.getName());
+         column.incrementNewTabPending();
+         panel_.addLeftWidget(
+               createSourceColumnWindow(
+                  name.getName(),
+                  name.getAccessibleName()
+                  )
+               );
+         sourceColumnManager_.openFile(
+               targetFile, 
+               fileTypeRegistry_.getTextTypeForFile(targetFile),
+               column,
+               new CommandWithArg<EditingTarget>() 
+                  {
+                     @Override
+                     public void execute(EditingTarget target)
+                     {
+                        column.decrementNewTabPending();
+                        if (onOpen != null) 
+                           onOpen.execute();
+                     }
+                  });
+      }
+   }
+
+   public void openFileInNewColumn(FileSystemItem targetFile) 
+   {
+      openFileInNewColumn(targetFile, null);
+   }
+
+   private boolean validateNewColumnRequest()
+   {
+      if (additionalSourceCount_ >= MAX_COLUMN_COUNT)
+      {
+         pGlobalDisplay_.get().showMessage(GlobalDisplay.MSG_INFO, constants_.cannotAddColumnText(),
+            constants_.cannotAddMoreColumnsText(MAX_COLUMN_COUNT));
+         return false;
+      }
+      return true;
+   }
+
+   private String getAdjacentWindow(LogicalWindow window, boolean before)
+   {
+      if (window.getNormal() == null)
+         return "";
+
+      String name = window.getNormal().getName();
+      int lastIndex = panes_.size() - 1;
+
+      // if we're the last (!before or first (before) window in the display, wrap around to the
+      // front
+      if (!before && window == panes_.get(lastIndex))
+         return additionalSourceCount_ > 0 ? sourceColumnManager_.getLeftColumnName() :
+            panes_.get(0).getNormal().getName();
+      else if (before)
+      {
+         if ((additionalSourceCount_ > 0 &&
+            StringUtil.equals(name, sourceColumnManager_.getLeftColumnName())) ||
+            (additionalSourceCount_ == 0 && window == panes_.get(0)))
+            return panes_.get(lastIndex).getNormal().getName();
+         else if (window == panes_.get(0))
+            return sourceColumnManager_.get(1).getName();
+      }
+
+      // source columns have special handling
+      if (sourceColumnManager_.getByName(name) != null &&
+         !StringUtil.equals(name, SourceColumnManager.MAIN_SOURCE_NAME))
+      {
+         if (before)
+            return sourceColumnManager_.getPreviousColumnName();
+         else
+         {
+            String nextName = sourceColumnManager_.getNextColumnName();
+            if (!StringUtil.equals(nextName, SourceColumnManager.MAIN_SOURCE_NAME))
+               return nextName;
+            return panes_.get(0).getNormal().getName();
+         }
+      }
+
+      for (int i = 0; i < panes_.size(); i++)
+      {
+         if (window.equals(panes_.get(i)))
+         {
+            if (before)
+               return panes_.get(i - 1).getNormal().getName();
+            return panes_.get(i + 1).getNormal().getName();
+         }
+      }
+
+      Debug.log("Couldn't locate adjacent pane for " + name);
+      return "";
+   }
+
+   private WindowState setWindowStateOnTabChange(LogicalWindow window, WorkbenchTabPanel tabPanel,
+                                                 ArrayList<Tab> tabs)
+   {
+      WindowState newState = window.getState();
+      if (tabs.isEmpty() && window.getState() != WindowState.MINIMIZE)
+         newState = WindowState.MINIMIZE;
+      else if (tabs.size() == 1 && tabs.get(0) == Tab.Presentation)
+      {
+         if (!session_.getSessionInfo().getPresentationState().isActive() &&
+             window.getState() != WindowState.MINIMIZE)
+            newState = WindowState.MINIMIZE;
+      }
+      else if (tabPanel.isEmpty() && !tabs.isEmpty())
+         newState = WindowState.NORMAL;
+
+      if (newState != window.getState())
+         window.onWindowStateChange(new WindowStateChangeEvent(newState));
+      return newState;
+   }
+
+   @SuppressWarnings("rawtypes")
+   private void focusWindow(String name)
+   {
+      if (StringUtil.isNullOrEmpty(name))
+         return;
+
+      // activate next pane
+      if (name.contains(SourceColumnManager.COLUMN_PREFIX))
+         sourceColumnManager_.activateColumn(name, null);
+      else
+      {
+         WorkbenchTab selected;
+         if (StringUtil.equals(PaneManager.CONSOLE_PANE, name))
+         {
+            selected = consoleTabPanel_.getSelectedIndex() >= 0 ?
+               consoleTabPanel_.getSelectedTab() :
+               null;
+
+            // Special handling for Console; Console does not have a WorkbenchTab when there are
+            // no other Console tabs open on start up and none have been added.
+            if (selected == null || StringUtil.equals(selected.getTitle(), consoleConstants_.consoleLabel()));
+            {
+               commands_.activateConsole().execute();
+               return;
+            }
+         }
+         else
+         {
+            if (StringUtil.equals(UserPrefsAccessor.Panes.QUADRANTS_TABSET1, name))
+               selected = tabSet1TabPanel_.getSelectedTab();
+            else
+               selected = tabSet2TabPanel_.getSelectedTab();
+            activateTab(wbTabToTab_.get(selected));
+         }
+         if (selected instanceof DelayLoadWorkbenchTab)
+            ((DelayLoadWorkbenchTab)selected).ensureVisible(true);
+         selected.setFocus();
+      }
+   }
+
+   private void focusAdjacentWindow(LogicalWindow window, boolean before)
+   {
+      String adjacent = getAdjacentWindow(window, before);
+
+      // TabSet1 and TabSet2 could be empty, if so skip to the next pane
+      while ((StringUtil.equals(UserPrefsAccessor.Panes.QUADRANTS_TABSET1, adjacent) && tabSet1TabPanel_.isEmpty()) ||
+             (StringUtil.equals(UserPrefsAccessor.Panes.QUADRANTS_TABSET2, adjacent) && tabSet2TabPanel_.isEmpty()))
+         adjacent = getAdjacentWindow(panesByName_.get(adjacent), before);
+
+      focusWindow(adjacent);
+   }
+
+   private void swapConsolePane(PaneConfig paneConfig, int consoleTargetIndex)
+   {
+      int consoleCurrentIndex = paneConfig.getConsoleIndex();
+      if (consoleCurrentIndex != consoleTargetIndex)
+      {
+         JsArrayString panes = JsArrayUtil.copy(paneConfig.getQuadrants());
+         panes.set(consoleCurrentIndex, panes.get(consoleTargetIndex));
+         panes.set(consoleTargetIndex, PaneManager.CONSOLE_PANE);
+         userPrefs_.panes().setGlobalValue(PaneConfig.create(
+            panes,
+            paneConfig.getTabSet1(),
+            paneConfig.getTabSet2(),
+            paneConfig.getHiddenTabSet(),
+            paneConfig.getConsoleLeftOnTop(),
+            paneConfig.getConsoleRightOnTop(),
+            sourceColumnManager_.getSize() - 1,
+            paneConfig.getSidebar(),
+            paneConfig.getSidebarVisible(),
+            paneConfig.getSidebarLocation()).cast());
+         userPrefs_.writeUserPrefs();
+      }
+   }
+
+   @Handler
+   public void onPaneLayout()
+   {
+      optionsLoader_.showOptions(PaneLayoutPreferencesPane.class, true);
+   }
+   
+   private PaneConfig normalizeAssistantLayout(PaneConfig config)
+   {
+      if (!paiUtil_.isPositAssistantEnabled() ||
+          (!containsTab(config.getTabSet1(), CHAT_PANE) &&
+           !containsTab(config.getTabSet2(), CHAT_PANE) &&
+           !containsTab(config.getHiddenTabSet(), CHAT_PANE)))
+         return config;
+
+      JsArrayString assistantOnly = JavaScriptObject.createArray().cast();
+      assistantOnly.push(CHAT_PANE);
+      PaneConfig normalized = PaneConfig.create(
+         JsArrayUtil.copy(config.getQuadrants()),
+         withoutTab(config.getTabSet1(), CHAT_PANE),
+         withoutTab(config.getTabSet2(), CHAT_PANE),
+         withoutTab(config.getHiddenTabSet(), CHAT_PANE),
+         config.getConsoleLeftOnTop(), config.getConsoleRightOnTop(),
+         config.getAdditionalSourceColumns(), assistantOnly, true, "right").cast();
+      userPrefs_.sidebarExclusive().setGlobalValue(true);
+      userPrefs_.panes().setGlobalValue(normalized);
+      userPrefs_.writeUserPrefs();
+      return normalized;
+   }
+
+   private boolean containsTab(JsArrayString tabs, String tab)
+   {
+      for (int i = 0; tabs != null && i < tabs.length(); i++)
+         if (StringUtil.equals(tabs.get(i), tab))
+            return true;
+      return false;
+   }
+
+   /**
+    * Toggle the LLM Assistant as an exclusive cover over the native right
+    * Environment/Files column. The Assistant is never allowed to occupy a
+    * normal workbench quadrant.
+    */
+   public void toggleAssistantCover()
+   {
+      if (isChatActivatedInSidebar() && panel_.isRightWidgetHidden())
+      {
+         setSidebarPref(false);
+         return;
+      }
+
+      PaneConfig config = getCurrentConfig();
+      JsArrayString assistantOnly = JavaScriptObject.createArray().cast();
+      assistantOnly.push(CHAT_PANE);
+      userPrefs_.sidebarExclusive().setGlobalValue(true);
+      userPrefs_.panes().setGlobalValue(PaneConfig.create(
+         JsArrayUtil.copy(config.getQuadrants()),
+         withoutTab(config.getTabSet1(), CHAT_PANE),
+         withoutTab(config.getTabSet2(), CHAT_PANE),
+         withoutTab(config.getHiddenTabSet(), CHAT_PANE),
+         config.getConsoleLeftOnTop(),
+         config.getConsoleRightOnTop(),
+         config.getAdditionalSourceColumns(),
+         assistantOnly,
+         true,
+         "right").cast());
+      userPrefs_.writeUserPrefs();
+   }
+
+   private JsArrayString withoutTab(JsArrayString tabs, String tabToRemove)
+   {
+      JsArrayString filtered = JavaScriptObject.createArray().cast();
+      for (int i = 0; tabs != null && i < tabs.length(); i++)
+      {
+         if (!StringUtil.equals(tabs.get(i), tabToRemove))
+            filtered.push(tabs.get(i));
+      }
+      return filtered;
+   }
+
+   public void setSidebarPref(boolean showSidebar)
+   {
+      PaneConfig paneConfig = getCurrentConfig();
+
+      if (showSidebar == paneConfig.getSidebarVisible())
+         return;
+
+      // Update the preference
+      userPrefs_.panes().setGlobalValue(PaneConfig.create(
+         JsArrayUtil.copy(paneConfig.getQuadrants()),
+         paneConfig.getTabSet1(),
+         paneConfig.getTabSet2(),
+         paneConfig.getHiddenTabSet(),
+         paneConfig.getConsoleLeftOnTop(),
+         paneConfig.getConsoleRightOnTop(),
+         paneConfig.getAdditionalSourceColumns(),
+         paneConfig.getSidebar(),
+         showSidebar,
+         paneConfig.getSidebarLocation()));
+
+      userPrefs_.writeUserPrefs();
+   }
+
+   /**
+    * Make the sidebar actually visible for a request the user must answer.
+    *
+    * setSidebarPref() alone is not enough: it returns early when the pref is
+    * already true, and the pref can be true while the widget is CSS-hidden (the
+    * Assistant cover is hidden in place, and a retained widget can outlive its
+    * LogicalWindow cache across a layout refresh). An approval card behind a
+    * hidden sidebar looks like a silently ignored request, so this pairs the
+    * pref write with an unconditional visible-state check. Both calls are
+    * idempotent and neither selects a tab nor moves focus.
+    */
+   public void revealSidebar()
+   {
+      setSidebarPref(true);
+
+      if (sidebar_ == null || panel_.isSidebarWidgetHidden())
+         showSidebar(true);
+   }
+
+   @Handler
+   public void onToggleSidebar()
+   {
+      // Toggle the preference value and update UI
+      PaneConfig paneConfig = getCurrentConfig();
+      boolean newVisibility = !paneConfig.getSidebarVisible();
+     
+      setSidebarPref(newVisibility);
+      // Apply immediately as well as through the preference observer. A
+      // CSS-hidden retained sidebar has no null-widget transition to trigger
+      // a later rebuild, so the command must own its visible-state change.
+      showSidebar(newVisibility);
+   }
+
+   @Handler
+   public void onToggleSidebarLocation()
+   {
+      // Toggle the sidebar location between left and right
+      PaneConfig paneConfig = getCurrentConfig();
+      String currentLocation = paneConfig.getSidebarLocation();
+      String newLocation = "left".equals(currentLocation) ? "right" : "left";
+      
+      // Update the preference
+      userPrefs_.panes().setGlobalValue(PaneConfig.create(
+         JsArrayUtil.copy(paneConfig.getQuadrants()),
+         paneConfig.getTabSet1(),
+         paneConfig.getTabSet2(),
+         paneConfig.getHiddenTabSet(),
+         paneConfig.getConsoleLeftOnTop(),
+         paneConfig.getConsoleRightOnTop(),
+         paneConfig.getAdditionalSourceColumns(),
+         paneConfig.getSidebar(),
+         paneConfig.getSidebarVisible(),
+         newLocation));
+      
+      // Persist the preference change
+      userPrefs_.writeUserPrefs();
+
+      // Moving off "right" while covered must restore Environment/Files
+      // BEFORE refreshSidebar() detaches/recreates the sidebar on the new
+      // side, or they'd be left invisible with nothing covering them.
+      if (panel_.isRightWidgetHidden())
+         uncoverRightColumn();
+
+      // Update the UI by hiding and re-showing the sidebar in the new location
+      refreshSidebar();
+
+      // Update command visibility based on new location
+      manageLayoutCommands();
+   }
+
+   public void showSidebar(boolean showSidebar)
+   {
+      LogicalWindow cached = panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR);
+      boolean cachedWindowHidden = cached != null && cached.getState() == WindowState.HIDE;
+      if (showSidebar && (sidebar_ == null || panel_.isSidebarWidgetHidden() || cachedWindowHidden))
+      {
+         showSidebarInternal();
+         // A retained widget may outlive its LogicalWindow cache during a
+         // layout refresh. The panel owns CSS visibility, so guarantee the
+         // command's visible-state contract even if that cache was rebuilt.
+         if (panel_.isSidebarWidgetHidden())
+            panel_.showSidebarWidget();
+      }
+      else if (!showSidebar && sidebar_ != null)
+         hideSidebarInternal();
+
+      commands_.toggleSidebar().setChecked(showSidebar);
+      manageZoomColumnCommands();
+
+      if (isChatInSidebar())
+         eventBus_.fireEvent(new ChatPaneActiveEvent(isChatActivatedInSidebar()));
+   }
+
+   private void showSidebarInternal()
+   {
+      PaneConfig config = getCurrentConfig();
+      ArrayList<Tab> tabs = tabNamesToTabs(config.getSidebar());
+
+      // If the sidebar was only hidden (not recreated) and its tab
+      // composition hasn't changed, un-hide the existing widget in place --
+      // this is what keeps the Assistant terminal's iframe/WebSocket/PTY
+      // alive across a toggle. Otherwise fall through to the historical
+      // recreate path (first show, or tabs changed via prefs).
+      LogicalWindow cached = panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR);
+      if (panel_.isSidebarWidgetHidden() && cached != null && tabs.equals(sidebarTabsCreated_))
+      {
+         // The recreate branch below always transitions to NORMAL; do the same here
+         // so LogicalWindow.getState()/visible() (used by zoom and other logic) don't
+         // stay stuck reporting whatever state applied before this toggle.
+         cached.transitionToState(WindowState.NORMAL);
+         sidebar_ = cached.getNormal();
+         panel_.showSidebarWidget();
+      }
+      else
+      {
+         // Always recreate sidebar to ensure tabs match current preference values
+         // This handles cases where preferences change via API without triggering client refresh
+         clearSidebarCache();
+         Triad<LogicalWindow, WorkbenchTabPanel, MinimizedModuleTabLayoutPanel> sidebar = createTabSet(
+               UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR,
+               tabs);
+         panesByName_.put(UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR, sidebar.first);
+         sidebarTabsCreated_ = tabs;
+         LogicalWindow sidebarWindow = sidebar.first;
+
+         if (sidebarWindow != null)
+         {
+            // For sidebar, we use just the WindowFrame directly (no vertical split)
+            sidebarWindow.transitionToState(WindowState.NORMAL);
+            sidebar_ = sidebarWindow.getNormal();
+            String location = config.getSidebarLocation();
+            panel_.setSidebarWidget(sidebar_, location);
+         }
+      }
+
+      if (shouldCoverRightColumn())
+         coverRightColumn();
+   }
+
+   private void hideSidebarInternal()
+   {
+      // Un-cover first so Environment/Files reclaim their footprint before
+      // the sidebar itself goes away.
+      if (panel_.isRightWidgetHidden())
+         uncoverRightColumn();
+
+      panel_.hideSidebarWidget();
+
+      // Keep the retained LogicalWindow NORMAL. The panel owns visual hiding;
+      // transitioning this child to HIDE schedules a second display mutation
+      // that can race a subsequent CSS-only re-show.
+
+      sidebar_ = null;
+   }
+
+   /**
+    * True when the sidebar is configured to replace (cover) the right
+    * column rather than add a fourth one -- right-side location plus the
+    * sidebar_exclusive preference.
+    */
+   private boolean shouldCoverRightColumn()
+   {
+      return "right".equals(getCurrentConfig().getSidebarLocation()) &&
+             userPrefs_.sidebarExclusive().getValue();
+   }
+
+   /**
+    * Hide right_ in place and size the sidebar to exactly its prior
+    * footprint, so the Assistant terminal covers Environment+Files instead
+    * of adding a fourth column.
+    */
+   private void coverRightColumn()
+   {
+      if (panel_.isRightWidgetHidden())
+         return;
+
+      int coveredWidth = right_.getOffsetWidth();
+      panel_.setRightWidgetHidden(true);
+      if (coveredWidth > 0)
+         panel_.setSidebarWidth(coveredWidth);
+   }
+
+   /**
+    * Reverse of coverRightColumn(): restore Environment/Files at their
+    * preserved width.
+    */
+   private void uncoverRightColumn()
+   {
+      if (!panel_.isRightWidgetHidden())
+         return;
+
+      panel_.setRightWidgetHidden(false);
+   }
+
+   /**
+    * Hides the sidebar if Chat is the only tab assigned to it.
+    * No-op when Chat is not in the sidebar or other tabs are present.
+    */
+   public void hideSidebarIfOnlyChatTab()
+   {
+      PaneConfig config = getCurrentConfig();
+      ArrayList<Tab> tabs = tabNamesToTabs(config.getSidebar());
+      tabs.remove(Tab.Chat);
+      if (tabs.isEmpty())
+      {
+         showSidebar(false);
+         setSidebarPref(false);
+      }
+   }
+
+   public void clearSidebarCache()
+   {
+      // Remove the cached sidebar window so it gets recreated with new tabs
+      panesByName_.remove(UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR);
+   }
+
+   public void refreshSidebar()
+   {
+      // If sidebar is visible, refresh it (e.g. if the sidebar location has changed).
+      // This must actually detach and recreate the widget -- showSidebar(false/true)
+      // alone would now just hide/un-hide it in place, leaving it on the OLD side.
+      if (sidebar_ != null)
+      {
+         // Preserve the current sidebar width before destroying
+         int sidebarWidth = panel_.getSidebarWidth();
+
+         panel_.removeSidebarWidget();
+         sidebar_ = null;
+         clearSidebarCache();
+         showSidebar(true);
+
+         // Restore the preserved width after recreation
+         if (sidebarWidth > 0)
+         {
+            // Use a deferred command to ensure the sidebar is fully initialized
+            Scheduler.get().scheduleDeferred(new ScheduledCommand()
+            {
+               public void execute()
+               {
+                  panel_.setSidebarWidth(sidebarWidth);
+               }
+            });
+         }
+      }
+   }
+
+   public void setSidebarLocation(String location)
+   {
+      // Update preference and refresh the sidebar if visible
+      PaneConfig paneConfig = getCurrentConfig();
+
+      // Only update if location has changed
+      if (!location.equals(paneConfig.getSidebarLocation()))
+      {
+         userPrefs_.panes().setGlobalValue(PaneConfig.create(
+            JsArrayUtil.copy(paneConfig.getQuadrants()),
+            paneConfig.getTabSet1(),
+            paneConfig.getTabSet2(),
+            paneConfig.getHiddenTabSet(),
+            paneConfig.getConsoleLeftOnTop(),
+            paneConfig.getConsoleRightOnTop(),
+            paneConfig.getAdditionalSourceColumns(),
+            paneConfig.getSidebar(),
+            paneConfig.getSidebarVisible(),
+            location));
+         
+         userPrefs_.writeUserPrefs();
+         
+         // If sidebar is visible, refresh it in the new location
+         refreshSidebar();
+      }
+   }
+   
+   private <T> boolean equals(T lhs, T rhs)
+   {
+      if (lhs == null)
+         return rhs == null;
+
+      return lhs.equals(rhs);
+   }
+
+   public void toggleWindowZoom(LogicalWindow window, Tab tab)
+   {
+      if (isAnimating_)
+         return;
+
+      boolean hasZoom = maximizedWindow_ != null;
+
+      if (hasZoom)
+      {
+         if (equals(window, maximizedWindow_))
+         {
+            // If we're trying to maximize the same pane that is currently maximized, interpret
+            // as a toggle off. There is only one tab per source column so always assume toggle off.
+            if (tab == Tab.SourceColumn ||
+                equals(tab, maximizedTab_))
+               restoreLayout();
+
+            // If we're zooming a different tab in the same window,
+            // just activate that tab.
+            else
+            {
+               maximizedTab_ = tab;
+               manageLayoutCommands();
+               activateTab(tab);
+            }
+         }
+         else
+         {
+            // We're transferring zoom from one window to another --
+            // maximize the new window.
+            fullyMaximizeWindow(window, tab);
+         }
+      }
+      else
+      {
+         // No zoom currently on -- just zoom the selected window + tab.
+         fullyMaximizeWindow(window, tab);
+      }
+   }
+
+   private void fullyMaximizeWindow(final LogicalWindow window, final Tab tab)
+   {
+      if (window.equals(getSourceLogicalWindow()))
+         maximizedTab_ = Tab.Source;
+      else if (window.equals(getConsoleLogicalWindow()))
+         maximizedTab_ = Tab.Console;
+      else if (sourceLogicalWindows_.contains(window))
+         maximizedTab_ = Tab.SourceColumn;
+      else
+         maximizedTab_ = tab;
+      maximizedWindow_ = window;
+
+      manageLayoutCommands();
+      eventBus_.fireEvent(new ChatPaneActiveEvent(isChatActivatedInSidebar()));
+      panel_.setSplitterEnabled(false);
+
+      // Check if sidebar is visible and get its location (needed for correct size saving)
+      PaneConfig config = getCurrentConfig();
+      boolean sidebarOnRight = sidebar_ != null && panel_.hasSidebarWidget() &&
+                               !"left".equals(config.getSidebarLocation());
+      boolean sidebarOnLeft = sidebar_ != null && panel_.hasSidebarWidget() &&
+                              "left".equals(config.getSidebarLocation());
+
+      // Save right widget size - use getOffsetWidth() when sidebar is on right
+      // because right_ is added with add() instead of addEast() in that configuration
+      if (widgetSizePriorToZoom_ < 0)
+      {
+         if (sidebarOnRight)
+            widgetSizePriorToZoom_ = right_.getOffsetWidth();
+         else
+            widgetSizePriorToZoom_ = panel_.getWidgetSize(right_);
+      }
+
+      // Put all of the panes in NORMAL mode, just to ensure an appropriate
+      // transfer to EXCLUSIVE mode works. (It seems that 'exclusive' -> 'exclusive'
+      // transfers don't always propagate as expected)
+      for (LogicalWindow pane : panes_)
+         pane.onWindowStateChange(new WindowStateChangeEvent(WindowState.NORMAL));
+      for (LogicalWindow pane : sourceLogicalWindows_)
+         pane.onWindowStateChange(new WindowStateChangeEvent(WindowState.NORMAL));
+
+      boolean isRightWidget =
+            DomUtils.contains(right_.getElement(), window.getActiveWidget().getElement());
+      boolean isCenterWidget =
+            DomUtils.contains(center_.getElement(), window.getActiveWidget().getElement());
+      boolean isSidebarWidget = sidebar_ != null &&
+            DomUtils.contains(sidebar_.getElement(), window.getActiveWidget().getElement());
+
+      window.onWindowStateChange(new WindowStateChangeEvent(WindowState.EXCLUSIVE));
+
+      ArrayList<Double> leftTargets = new ArrayList<>();
+      {
+         if (leftWidgetSizePriorToZoom_.size() != leftList_.size())
+            leftWidgetSizePriorToZoom_.clear();
+         for (Widget column : leftList_)
+         {
+            leftWidgetSizePriorToZoom_.add(panel_.getWidgetSize(column));
+            if (!isRightWidget &&
+                !isCenterWidget &&
+                DomUtils.contains(column.getElement(), window.getActiveWidget().getElement()))
+               leftTargets.add((double) panel_.getOffsetWidth());
+            else
+               leftTargets.add(0.0);
+         }
+      }
+
+      double rightTargetSize = isRightWidget ? panel_.getOffsetWidth() : 0;
+
+      if (rightTargetSize < 0)
+         rightTargetSize = 0;
+
+      // Ensure focus is sent to Help iframe on activation.
+      Command onActivation = null;
+      if (maximizedTab_.equals(Tab.Help))
+      {
+         onActivation = () -> commands_.activateHelp().execute();
+      }
+
+      // If sidebar is visible, we need to handle it during zoom
+      if (sidebarOnRight || sidebarOnLeft)
+      {
+         // Store sidebar's prior size if not already saved
+         if (sidebarSizePriorToZoom_ < 0)
+            sidebarSizePriorToZoom_ = sidebar_.getOffsetWidth();
+
+         double sidebarTarget;
+         if (isSidebarWidget)
+         {
+            // Zooming a sidebar widget - expand sidebar to fill entire UI
+            sidebarTarget = panel_.getOffsetWidth();
+            // Collapse all other columns
+            rightTargetSize = 0.0;
+            for (int i = 0; i < leftTargets.size(); i++)
+               leftTargets.set(i, 0.0);
+         }
+         else
+         {
+            // Zooming a non-sidebar widget - collapse sidebar to 0
+            sidebarTarget = 0.0;
+         }
+
+         if (sidebarOnRight)
+            resizeHorizontallyWithSidebarOnRight(rightTargetSize, leftTargets, sidebarTarget, onActivation);
+         else
+            resizeHorizontallyWithSidebarOnLeft(rightTargetSize, leftTargets, sidebarTarget, onActivation);
+      }
+      else
+      {
+         // No sidebar visible - use original behavior
+         resizeHorizontally(rightTargetSize, leftTargets, onActivation);
+      }
+   }
+
+   private void resizeHorizontally(final double rightTarget,
+                                   final ArrayList<Double> leftTargets)
+   {
+      resizeHorizontally(rightTarget, leftTargets, null);
+   }
+
+   private void resizeHorizontally(final double rightTarget,
+                                   final ArrayList<Double> leftTargets,
+                                   final Command afterComplete)
+   {
+      panel_.setWidgetSize(right_, rightTarget);
+      for (int i = 0; i < leftList_.size(); i++)
+         panel_.setWidgetSize(leftList_.get(i), leftTargets.get(i));
+
+      int duration = (userPrefs_.reducedMotion().getValue() ? 0 : 300);
+      panel_.animate(duration, new AnimationCallback()
+      {
+         public void onAnimationComplete()
+         {
+            panel_.onSplitterResized(new SplitterResizedEvent());
+            if (afterComplete != null)
+               afterComplete.execute();
+         }
+
+         public void onLayout(Layer layer, double progress)
+         {
+         }
+      });
+   }
+
+   private void resizeHorizontallyWithSidebarOnRight(final double rightTarget,
+                                                     final ArrayList<Double> leftTargets,
+                                                     final double sidebarTarget,
+                                                     final Command afterComplete)
+   {
+      // right_ is EAST and sidebar_ is EAST, so both can be sized directly.
+      // center_ is CENTER and fills remaining space automatically.
+
+      // Splitter width constant (each splitter is 7px wide)
+      final double SPLITTER_WIDTH = 7.0;
+
+      // Check if we're zooming the sidebar
+      double leftTotal = 0.0;
+      for (Double target : leftTargets)
+         leftTotal += target;
+      boolean isZoomingSidebar = sidebarTarget > 0 &&
+                                 rightTarget == 0.0 &&
+                                 leftTotal == 0.0 &&
+                                 sidebarTarget > (panel_.getOffsetWidth() - 50);
+
+      double sidebarWidth;
+      double actualRightTarget = rightTarget;
+      ArrayList<Double> actualLeftTargets = new ArrayList<>(leftTargets);
+
+      if (isZoomingSidebar)
+      {
+         // When zooming sidebar, collapse all other columns
+         int numSplitters = 1 + actualLeftTargets.size() + 1;
+         double splitterSpace = numSplitters * SPLITTER_WIDTH;
+         double minimalWidgetSpace = actualLeftTargets.size() * 1.0 + 1.0;
+         sidebarWidth = panel_.getOffsetWidth() - splitterSpace - minimalWidgetSpace;
+         for (int i = 0; i < actualLeftTargets.size(); i++)
+            actualLeftTargets.set(i, 1.0);
+         actualRightTarget = 1.0;
+      }
+      else
+      {
+         // Use sidebar target if provided, otherwise use current width
+         sidebarWidth = sidebarTarget >= 0 ? sidebarTarget : sidebar_.getOffsetWidth();
+      }
+
+      if (sidebar_ != null)
+         panel_.setWidgetSize(sidebar_, sidebarWidth);
+
+      for (int i = 0; i < leftList_.size(); i++)
+         panel_.setWidgetSize(leftList_.get(i), actualLeftTargets.get(i));
+
+      panel_.setWidgetSize(right_, actualRightTarget);
+
+      int duration = (userPrefs_.reducedMotion().getValue() ? 0 : 300);
+      panel_.animate(duration, new AnimationCallback()
+      {
+         public void onAnimationComplete()
+         {
+            panel_.onSplitterResized(new SplitterResizedEvent());
+            if (afterComplete != null)
+               afterComplete.execute();
+         }
+
+         public void onLayout(Layer layer, double progress)
+         {
+         }
+      });
+   }
+
+   private void resizeHorizontallyWithSidebarOnLeft(final double rightTarget,
+                                                     final ArrayList<Double> leftTargets,
+                                                     final double sidebarTarget,
+                                                     final Command afterComplete)
+   {
+      // When sidebar is on left, it's added with addWest() so setWidgetSize() works.
+      // Layout: Sidebar + Left widgets + Center + Right = Panel width
+      // Sidebar, left widgets, and right can be sized directly; center auto-fills.
+
+      // Splitter width constant (each splitter is 7px wide)
+      final double SPLITTER_WIDTH = 7.0;
+
+      // Check if we're zooming the sidebar
+      // Check that sidebar target is close to panel width to distinguish zooming from restoring
+      double leftTotal = 0.0;
+      for (Double target : leftTargets)
+         leftTotal += target;
+      boolean isZoomingSidebar = sidebarTarget > 0 &&
+                                 rightTarget == 0.0 &&
+                                 leftTotal == 0.0 &&
+                                 sidebarTarget > (panel_.getOffsetWidth() - 50);
+
+      double sidebarWidth;
+      double actualRightTarget = rightTarget;
+      ArrayList<Double> actualLeftTargets = new ArrayList<>(leftTargets);
+
+      if (isZoomingSidebar)
+      {
+         // When zooming sidebar on left, we need special handling for splitters
+         // Count total number of splitters (sidebar + left widgets + middle column)
+         int numSplitters = 1 + actualLeftTargets.size() + 1;
+         // Calculate space needed for splitters and minimal widget widths
+         double splitterSpace = numSplitters * SPLITTER_WIDTH;
+         double minimalWidgetSpace = actualLeftTargets.size() * 1.0 + 1.0; // 1px per widget
+         // Sidebar gets remaining space
+         sidebarWidth = panel_.getOffsetWidth() - splitterSpace - minimalWidgetSpace;
+         // Give each collapsed widget 1px to maintain splitter separation
+         for (int i = 0; i < actualLeftTargets.size(); i++)
+            actualLeftTargets.set(i, 1.0);
+         // Right widget gets 1px to maintain splitter visibility
+         actualRightTarget = 1.0;
+      }
+      else
+      {
+         // Use sidebar target if provided, otherwise use current width
+         sidebarWidth = sidebarTarget >= 0 ? sidebarTarget : sidebar_.getOffsetWidth();
+      }
+
+      if (sidebar_ != null)
+         panel_.setWidgetSize(sidebar_, sidebarWidth);
+
+      for (int i = 0; i < leftList_.size(); i++)
+         panel_.setWidgetSize(leftList_.get(i), actualLeftTargets.get(i));
+
+      panel_.setWidgetSize(right_, actualRightTarget);
+
+      int duration = (userPrefs_.reducedMotion().getValue() ? 0 : 300);
+      panel_.animate(duration, new AnimationCallback()
+      {
+         public void onAnimationComplete()
+         {
+            panel_.onSplitterResized(new SplitterResizedEvent());
+            if (afterComplete != null)
+               afterComplete.execute();
+         }
+
+         public void onLayout(Layer layer, double progress)
+         {
+         }
+      });
+   }
+
+   private void restoreLayout()
+   {
+      restoreLayout(null);
+   }
+
+   private void restoreLayout(Command afterComplete)
+   {
+      // If we're currently zoomed, then use that to provide the previous
+      // 'non-zoom' state.
+      if (maximizedWindow_ != null &&
+          leftList_.size() == leftWidgetSizePriorToZoom_.size())
+         restoreSavedLayout(afterComplete);
+      else
+         restorePaneLayout(afterComplete);
+   }
+
+   private void invalidateSavedLayoutState(boolean enableSplitter)
+   {
+      maximizedWindow_ = null;
+      maximizedTab_ = null;
+      widgetSizePriorToZoom_ = -1;
+      sidebarSizePriorToZoom_ = -1;
+      leftWidgetSizePriorToZoom_.clear();
+      panel_.setSplitterEnabled(enableSplitter);
+      manageLayoutCommands();
+      eventBus_.fireEvent(new ChatPaneActiveEvent(isChatActivatedInSidebar()));
+   }
+
+   private void restorePaneLayout()
+   {
+      restorePaneLayout(null);
+   }
+
+   private void restorePaneLayout(Command afterComplete)
+   {
+      restorePaneStateToDefault();
+      restoreColumnLayout();
+
+      // restoreColumnLayout applies column widths via setWidgetSize without an
+      // explicit animate(), so there's no animation callback to hook here --
+      // the sizes are already applied by the time we return. Run afterComplete
+      // directly. (The pane/window-zoom path goes through restoreSavedLayout,
+      // which does animate and threads afterComplete into onAnimationComplete.)
+      if (afterComplete != null)
+         afterComplete.execute();
+   }
+
+   private Double getValidColumnWidth(Widget w, boolean set)
+   {
+      return getValidColumnWidths(new ArrayList<> (Arrays.asList(w)),
+         new ArrayList<>(Arrays.asList(panel_.getWidgetSize(w))), set).get(0);
+   }
+
+   private ArrayList<Double> getValidColumnWidths(final ArrayList<Widget> widgets, boolean set)
+   {
+      ArrayList<Double> currentWidths = new ArrayList<>();
+      for (Widget widget : widgets)
+         currentWidths.add(panel_.getWidgetSize(widget));
+      return getValidColumnWidths(widgets, currentWidths, set);
+   }
+
+   /**
+    * Calculate a visible width for each widget provided while attempting to keep each
+    * widget as close to its requested size. The non-allocated portion of the total panel should
+    * be enough to display columns not provided.
+    * @param widgets List of widgets to set sizes of. These widgets must be part of panel_.
+    * @param widths List of ideal widths for each widget. This can be empty.
+    * @param set When true, sets the width on panel_.
+    * @return The list of valid sizes
+    */
+   private ArrayList<Double> getValidColumnWidths(
+      final ArrayList<Widget> widgets,
+      final ArrayList<Double> widths,
+      boolean set)
+   {
+      final double columnWidth = panel_.getOffsetWidth() / getColumnCount();
+
+      // The pixels allocated for the widgets provided leave enough pixels so that each column
+      // will have a width of at least half of columnWidth
+      double minColumnWidth = columnWidth / 2;
+      double maxColumnWidth = columnWidth * 2;
+
+      // Calculate the min and max amount of pixels we must leave for columns not specified.
+      int remainingColumns = getColumnCount() - widgets.size();
+      double minAllocated = panel_.getOffsetWidth() - (remainingColumns * minColumnWidth);
+      double maxAllocated = panel_.getOffsetWidth() - (remainingColumns * maxColumnWidth);
+
+      // Because each panel cannot take up the max threshold, leave enough space so every
+      // remaining column can at least contain the minimum threshold.
+      if (maxAllocated < (widgets.size() * minColumnWidth))
+        maxAllocated = Math.max((maxAllocated - (widgets.size() * minColumnWidth)), minAllocated);
+
+      // Determine if each provided width is within our threshold.
+      // If not, set it size to the min or max threshold.
+      // If no width is provided, the width is set to the columnWidth calculated above.
+      double minThreshold = minAllocated / widgets.size();
+      double maxThreshold = maxAllocated / widgets.size();
+      ArrayList<Double> result = new ArrayList<>();
+      for (int i = 0; i < widgets.size(); i++)
+      {
+         double width = columnWidth;
+         if (widths.size() > i)
+         {
+            width = widths.get(i);
+            if (width < minThreshold)
+               width = minThreshold;
+            else if (width > maxThreshold)
+               width = maxThreshold;
+         }
+         if (set)
+            panel_.setWidgetSize(widgets.get(i), width);
+         result.add(width);
+      }
+      return result;
+   }
+
+   private void restoreColumnLayout()
+   {
+      getValidColumnWidth(right_, true);
+      getValidColumnWidths(leftList_, leftWidgetSizePriorToZoom_, true);
+      invalidateSavedLayoutState(true);
+   }
+
+   private void restoreSavedLayout(Command afterComplete)
+   {
+      restorePaneStateToDefault();
+
+      maximizedWindow_.onWindowStateChange(new WindowStateChangeEvent(WindowState.NORMAL, true));
+
+      ArrayList<Double> leftTargets = new ArrayList<>();
+      if (leftList_.size() > 0)
+      {
+         if (leftWidgetSizePriorToZoom_.size() != leftList_.size())
+            leftTargets = getValidColumnWidths(leftList_, leftWidgetSizePriorToZoom_, false);
+         else
+            leftTargets.addAll(leftWidgetSizePriorToZoom_);
+      }
+
+      // Check if sidebar is visible and get its location
+      PaneConfig config = getCurrentConfig();
+      boolean sidebarOnRight = sidebar_ != null && panel_.hasSidebarWidget() &&
+                               !"left".equals(config.getSidebarLocation());
+      boolean sidebarOnLeft = sidebar_ != null && panel_.hasSidebarWidget() &&
+                              "left".equals(config.getSidebarLocation());
+
+      // Restore with sidebar handling if sidebar was visible during zoom
+      if ((sidebarOnRight || sidebarOnLeft) && sidebarSizePriorToZoom_ >= 0)
+      {
+         if (sidebarOnRight)
+            resizeHorizontallyWithSidebarOnRight(widgetSizePriorToZoom_, leftTargets, sidebarSizePriorToZoom_, afterComplete);
+         else
+            resizeHorizontallyWithSidebarOnLeft(widgetSizePriorToZoom_, leftTargets, sidebarSizePriorToZoom_, afterComplete);
+      }
+      else
+      {
+         // No sidebar or sidebar wasn't saved - use original behavior
+         resizeHorizontally(widgetSizePriorToZoom_, leftTargets, afterComplete);
+      }
+
+      invalidateSavedLayoutState(true);
+   }
+
+   private void restorePaneStateToDefault()
+   {
+      // Ensure that all windows are in the 'normal' state. This allows hidden windows to display
+      // themselves, and so on. This also forces widgets to size themselves vertically.
+      // TabSet Panes without any tabs should remain minimized.
+      for (LogicalWindow window : panes_)
+      {
+         boolean shouldMinimize = false;
+
+         // Check if this is an empty TabSet
+         if ((window == panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET1) && tabSet1TabPanel_.isEmpty()) ||
+             (window == panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET2) && tabSet2TabPanel_.isEmpty()))
+         {
+            shouldMinimize = true;
+         }
+
+         if (shouldMinimize)
+         {
+            if (window.getState() != WindowState.MINIMIZE)
+               window.onWindowStateChange(new WindowStateChangeEvent(WindowState.MINIMIZE));
+         }
+         else
+            window.onWindowStateChange(
+               new WindowStateChangeEvent(WindowState.NORMAL, true));
+      }
+   }
+
+   @Handler
+   public void onMaximizeConsole()
+   {
+      // acts as a toggle (maximize/restore)
+      getConsoleLogicalWindow().onWindowStateChange(new WindowStateChangeEvent(WindowState.MAXIMIZE));
+   }
+
+   @Handler
+   public void onMaximizeSource()
+   {
+      // acts as a toggle (maximize/restore)
+      getSourceLogicalWindow().onWindowStateChange(new WindowStateChangeEvent(WindowState.MAXIMIZE));
+   }
+
+   @Handler
+   public void onMaximizeTabSet1()
+   {
+      // acts as a toggle (maximize/restore)
+      LogicalWindow tabSet1 = panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET1);
+      tabSet1.onWindowStateChange(new WindowStateChangeEvent(WindowState.MAXIMIZE));
+   }
+
+   @Handler
+   public void onMaximizeTabSet2()
+   {
+      // acts as a toggle (maximize/restore)
+      LogicalWindow tabSet2 = panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET2);
+      tabSet2.onWindowStateChange(new WindowStateChangeEvent(WindowState.MAXIMIZE));
+   }
+
+   private ArrayList<LogicalWindow> createPanes(PaneConfig config)
+   {
+      ArrayList<LogicalWindow> results = new ArrayList<>();
+
+      // Do not include hiddenTabSet in panes since it should never be displayed
+      JsArrayString panes = config.getQuadrants();
+      for (int i = 0; i < panes.length(); i++)
+      {
+         if (StringUtil.equals(panes.get(i), UserPrefsAccessor.Panes.QUADRANTS_HIDDENTABSET))
+            continue;
+         results.add(panesByName_.get(panes.get(i)));
+      }
+      return results;
+   }
+
+   private void initPanes(PaneConfig config)
+   {
+      panesByName_ = new HashMap<>();
+      panesByName_.put(PaneManager.CONSOLE_PANE, createConsole());
+
+      ArrayList<SourceColumn> columns = sourceColumnManager_.getColumnList();
+      for (SourceColumn column : columns)
+      {
+         panesByName_.put(column.getName(), createSource(column.getName(), column.getAccessibleName(),
+            column.asWidget()));
+      }
+
+      Triad<LogicalWindow, WorkbenchTabPanel, MinimizedModuleTabLayoutPanel> ts1 = createTabSet(
+            UserPrefsAccessor.Panes.QUADRANTS_TABSET1,
+            tabNamesToTabs(config.getTabSet1()));
+      panesByName_.put(UserPrefsAccessor.Panes.QUADRANTS_TABSET1, ts1.first);
+      tabSet1TabPanel_ = ts1.second;
+      tabSet1MinPanel_ = ts1.third;
+
+      Triad<LogicalWindow, WorkbenchTabPanel, MinimizedModuleTabLayoutPanel> ts2 = createTabSet(
+            UserPrefsAccessor.Panes.QUADRANTS_TABSET2,
+            tabNamesToTabs(config.getTabSet2()));
+      panesByName_.put(UserPrefsAccessor.Panes.QUADRANTS_TABSET2, ts2.first);
+      tabSet2TabPanel_ = ts2.second;
+      tabSet2MinPanel_ = ts2.third;
+
+      Triad<LogicalWindow, WorkbenchTabPanel, MinimizedModuleTabLayoutPanel> tsHide = createTabSet(
+            UserPrefsAccessor.Panes.QUADRANTS_HIDDENTABSET,
+            tabNamesToTabs(config.getHiddenTabSet()));
+      panesByName_.put(UserPrefsAccessor.Panes.QUADRANTS_HIDDENTABSET, tsHide.first);
+      hiddenTabSetTabPanel_ = tsHide.second;
+      hiddenTabSetTabPanel_.setNeverVisible(true);
+      hiddenTabSetMinPanel_ = tsHide.third;
+      
+      // Initialize sidebar (always create it, even if not initially visible)
+      sidebarTabsCreated_ = tabNamesToTabs(config.getSidebar());
+      Triad<LogicalWindow, WorkbenchTabPanel, MinimizedModuleTabLayoutPanel> sidebar = createTabSet(
+            UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR,
+            sidebarTabsCreated_);
+      panesByName_.put(UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR, sidebar.first);
+
+      // Initialize the sidebar window state (HIDE if not visible, NORMAL if visible)
+      // This prevents null state_ in LogicalWindow.visible()
+      sidebar.first.transitionToState(config.getSidebarVisible() ? WindowState.NORMAL : WindowState.HIDE);
+   }
+
+   private ArrayList<Tab> tabNamesToTabs(JsArrayString tabNames)
+   {
+      ArrayList<Tab> tabList = new ArrayList<>();
+      // this is necessary to avoid issues when moving from 1.3 where hiddenTabSet did not exist
+      if (tabNames != null)
+      {
+         for (int j = 0; j < tabNames.length(); j++)
+         {
+            Tab tab = Enum.valueOf(Tab.class, tabNames.get(j));
+            if (tab == Tab.Chat && !paiUtil_.isPositAssistantEnabled())
+               continue;
+            tabList.add(tab);
+         }
+      }
+      return tabList;
+   }
+
+   private PaneConfig validateConfig(PaneConfig config)
+   {
+      if (config == null)
+         config = PaneConfig.createDefault();
+      if (!config.validateAndAutoCorrect())
+      {
+         Debug.log("Pane config is not valid");
+         config = PaneConfig.createDefault();
+      }
+      return config;
+   }
+
+   public MainSplitPanel getPanel()
+   {
+      return panel_;
+   }
+
+   public WorkbenchTab getTab(Tab tab)
+   {
+      switch (tab)
+      {
+         case History:
+            return historyTab_;
+         case Files:
+            return filesTab_;
+         case Plots:
+            return plotsTab_;
+         case Packages:
+            return packagesTab_;
+         case Help:
+            return helpTab_;
+         case VCS:
+            return vcsTab_;
+         case Tutorial:
+            return tutorialTab_;
+         case Chat:
+            return chatTab_;
+         case Build:
+            return buildTab_;
+         case Presentation:
+            return presentationTab_;
+         case Presentations:
+            return presentation2Tab_;
+         case Environment:
+            return environmentTab_;
+         case Viewer:
+            return viewerTab_;
+         case Connections:
+            return connectionsTab_;
+         case Source:
+         case SourceColumn:
+         case Console:
+            // not 'real' tabs so should be an error to ask for their tabs
+      }
+      throw new IllegalArgumentException("Unknown tab");
+   }
+
+   public WorkbenchTab[] getAllTabs()
+   {
+      // Build list of tabs, conditionally including Chat based on preference
+      ArrayList<WorkbenchTab> tabs = new ArrayList<>();
+      tabs.add(historyTab_);
+      tabs.add(filesTab_);
+      tabs.add(plotsTab_);
+      tabs.add(packagesTab_);
+      tabs.add(helpTab_);
+      tabs.add(vcsTab_);
+      tabs.add(tutorialTab_);
+      tabs.add(buildTab_);
+      tabs.add(presentationTab_);
+      tabs.add(presentation2Tab_);
+      tabs.add(environmentTab_);
+      tabs.add(viewerTab_);
+      if (paiUtil_.isPositAssistantEnabled())
+         tabs.add(chatTab_);
+      tabs.add(connectionsTab_);
+      tabs.add(jobsTab_);
+      tabs.add(launcherJobsTab_);
+      return tabs.toArray(new WorkbenchTab[tabs.size()]);
+   }
+
+   public void activateTab(Tab tab)
+   {
+      if (tab == Tab.Chat)
+      {
+         toggleAssistantCover();
+         return;
+      }
+
+      lastSelectedTab_ = tab;
+      WorkbenchTabPanel panel = getOwnerTabPanel(tab);
+      LogicalWindow parent = panel.getParentWindow();
+
+      // If the Assistant is covering the right column, activating an
+      // Environment/Files tab must dismiss it first -- covering must never
+      // make those tabs permanently unreachable.
+      if (panel_.isRightWidgetHidden() &&
+          (parent == panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET1) ||
+           parent == panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET2)))
+      {
+         setSidebarPref(false);
+      }
+
+      // If the tab belongs to the hidden tabset, add it to one being displayed
+      if (parent == panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_HIDDENTABSET))
+      {
+         // Try to find a visible tabSet, if both are hidden - add to tabSet1
+         LogicalWindow tabSet1 = panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET1);
+         LogicalWindow tabSet2 = panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_TABSET2);
+         if (tabSet1.visible() || !tabSet2.visible())
+         {
+            parent = tabSet1;
+            panel = tabSet1TabPanel_;
+            moveHiddenTabToTabSet1(tab, tabs1_);
+         }
+         else
+         {
+            parent = tabSet2;
+            panel = tabSet2TabPanel_;
+            moveHiddenTabToTabSet2(tab, tabs2_);
+         }
+
+         // Refresh chat command visibility now that the tab is no longer hidden
+         if (tab == Tab.Chat)
+            manageChatCommands();
+      }
+
+      // Ensure that the pane is visible (otherwise tab selection will fail)
+      if (!parent.visible())
+      {
+         parent.onWindowStateChange(new WindowStateChangeEvent(WindowState.NORMAL));
+      }
+
+      // If the tab is in the sidebar, ensure the sidebar is visible
+      if (parent == panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR))
+      {
+         // Check if sidebar is currently hidden and show it
+         if (sidebar_ == null)
+         {
+            showSidebar(true);
+            // Update the preference to persist the visibility
+            setSidebarPref(true);
+         }
+      }
+
+      // Re-fetch panel: showSidebar() recreates the sidebar's WorkbenchTabPanel,
+      // which invalidates the reference captured above.
+      panel = getOwnerTabPanel(tab);
+      if (panel == null)
+         return;
+
+      if (tabToIndex_.containsKey(tab))
+      {
+         int index = tabToIndex_.get(tab);
+         panel.selectTab(index);
+      }
+      else
+      {
+         // unexpected; why are we trying to activate a suppressed tab?
+         Debug.logWarning("Attempt to activate suppressed or unavailable " +
+                          "tab '" + tab.name() + "')");
+      }
+   }
+
+   public void activateTab(String tabName)
+   {
+      Tab tab = tabForName(tabName);
+      if (tab != null)
+         activateTab(tab);
+   }
+   
+   public void focusTab(Tab tab)
+   {
+      WorkbenchTab wbTab = getTab(tab);
+      if (wbTab != null)
+         wbTab.setFocus();
+   }
+
+   public void zoomTab(Tab tab)
+   {
+      activateTab(tab);
+      WorkbenchTabPanel tabPanel = getOwnerTabPanel(tab);
+      LogicalWindow parentWindow = tabPanel.getParentWindow();
+      if (parentWindow == null)
+         return;
+
+      toggleWindowZoom(parentWindow, tab);
+   }
+
+   private JsArrayString tabListToJsArrayString(ArrayList<Tab> tabs)
+   {
+      JsArrayString tabSet = JsArrayString.createArray().cast();
+      for (Tab tab : tabs)
+         tabSet.push(tab.name());
+      return tabSet;
+   }
+
+   private void moveTabToVisiblePanel(Tab tab, ArrayList<Tab> tabs)
+   {
+      // Remove tab from hidden tabSet
+      hiddenTabs_.remove(tab);
+
+      // Add tab to the back of the new set
+      if (StringUtil.equals(tabs.get(tabs.size() - 1).name(), PaneManager.PRESENTATION_PANE))
+         tabs.add(tabs.size() - 1, tab);
+      else
+         tabs.add(tab);
+   }
+
+   private void moveHiddenTabToTabSet1(Tab tab, ArrayList<Tab> tabs)
+   {
+      moveTabToVisiblePanel(tab, tabs);
+
+      PaneConfig paneConfig = getCurrentConfig();
+      userPrefs_.panes().setGlobalValue(PaneConfig.create(
+         JsArrayUtil.copy(paneConfig.getQuadrants()),
+         tabListToJsArrayString(tabs),
+         paneConfig.getTabSet2(),
+         tabListToJsArrayString(hiddenTabs_),
+         paneConfig.getConsoleLeftOnTop(),
+         paneConfig.getConsoleRightOnTop(),
+         sourceColumnManager_.getSize() - 1,
+         paneConfig.getSidebar(),
+         paneConfig.getSidebarVisible(),
+         paneConfig.getSidebarLocation()).cast());
+      userPrefs_.writeUserPrefs();
+   }
+
+   private void moveHiddenTabToTabSet2(Tab tab, ArrayList<Tab> tabs)
+   {
+      moveTabToVisiblePanel(tab, tabs);
+
+      PaneConfig paneConfig = getCurrentConfig();
+      userPrefs_.panes().setGlobalValue(PaneConfig.create(
+         JsArrayUtil.copy(paneConfig.getQuadrants()),
+         paneConfig.getTabSet1(),
+         tabListToJsArrayString(tabs),
+         tabListToJsArrayString(hiddenTabs_),
+         paneConfig.getConsoleLeftOnTop(),
+         paneConfig.getConsoleRightOnTop(),
+         sourceColumnManager_.getSize() - 1,
+         paneConfig.getSidebar(),
+         paneConfig.getSidebarVisible(),
+         paneConfig.getSidebarLocation()).cast());
+      userPrefs_.writeUserPrefs();
+   }
+
+   /**
+    * @return name of zoomed column, or null if no zoomed column; zoomed in this case means
+    *         the splitter is dragged all the way to the left or right
+    */
+   private String getZoomedColumn()
+   {
+      // Panel must have laid out its children before we can read sizes.
+      // right_ has no LayoutData until panel_.initialize() adds it.
+      if (right_.getLayoutData() == null)
+         return null;
+
+      // When sidebar is on the right, right_ is added with add() not addEast(),
+      // so getWidgetSize() doesn't work. Use getOffsetWidth() instead.
+      PaneConfig config = getCurrentConfig();
+      boolean sidebarOnRight = sidebar_ != null && panel_.hasSidebarWidget() &&
+                               !"left".equals(config.getSidebarLocation());
+      boolean sidebarOnLeft = sidebar_ != null && panel_.hasSidebarWidget() &&
+                              "left".equals(config.getSidebarLocation());
+
+      // While an exclusive-mode sidebar covers right_, it has no meaningful
+      // size -- treat it as absent rather than "collapsed to 0", which would
+      // otherwise misread as a left-column zoom.
+      if (panel_.isRightWidgetHidden())
+      {
+         double panelWidth = panel_.getOffsetWidth();
+         if (panelWidth == 0)
+            return null;
+         double sidebarWidth = sidebar_ != null ? sidebar_.getOffsetWidth() : 0;
+         if (sidebarOnRight &&
+             (MathUtil.isEqual(sidebarWidth, panelWidth, 20.0) || sidebarWidth > panelWidth - 20.0))
+            return SIDEBAR_COLUMN;
+         return null;
+      }
+
+      double currentColumnSize;
+      if (sidebarOnRight)
+         currentColumnSize = right_.getOffsetWidth();
+      else
+         currentColumnSize = panel_.getWidgetSize(right_);
+
+      // Check if sidebar is zoomed by seeing if it takes up (almost) the entire panel width
+      if (sidebarOnRight || sidebarOnLeft)
+      {
+         double sidebarWidth = sidebar_.getOffsetWidth();
+         double panelWidth = panel_.getOffsetWidth();
+
+         // Check if we're in a transitional layout state (during initial layout or
+         // sidebar show/hide). Don't report zoom state during transitions as widget
+         // sizes may not be accurately calculated yet.
+         if (panelWidth == 0)
+            return null;
+
+         // Allow for small rounding differences and splitter widths (2 splitters = 14px)
+         // When zoomed, sidebar width should be approximately panelWidth - 14px
+         if (MathUtil.isEqual(sidebarWidth, panelWidth, 20.0) ||
+             sidebarWidth > panelWidth - 20.0)
+         {
+            return SIDEBAR_COLUMN;
+         }
+      }
+
+      // Check if right column is zoomed by seeing if left/center are collapsed.
+      // When sidebar is on right, we can't reliably check right column size due to splitters,
+      // so instead check if all other columns are at 0.
+      double centerSize = center_.getOffsetWidth();
+      double leftSize = 0;
+      for (Widget w : leftList_)
+         leftSize += w.getOffsetWidth();
+
+      boolean leftAndCenterCollapsed = MathUtil.isEqual(centerSize, 0.0, 0.0001) &&
+                                       MathUtil.isEqual(leftSize, 0.0, 0.0001);
+
+      if (MathUtil.isEqual(currentColumnSize, 0.0, 0.0001))
+      {
+         // If right column size is 0, check if we're in a transitional layout state.
+         // When sidebar is being shown/hidden, or during initial layout, widgets are
+         // temporarily at width 0. Don't report zoom state in this case.
+         if (panel_.getOffsetWidth() == 0 || center_.getOffsetWidth() == 0)
+            return null;
+         return LEFT_COLUMN;
+      }
+
+      if (sidebarOnRight)
+      {
+         // When sidebar is on right, check if left/center are collapsed
+         if (leftAndCenterCollapsed)
+            return RIGHT_COLUMN;
+      }
+      else
+      {
+         // When no sidebar on right, use the original size-based check
+         double rightZoomPosition = panel_.getOffsetWidth();
+         if (MathUtil.isEqual(currentColumnSize, rightZoomPosition, 0.0001) ||
+             MathUtil.isEqual(currentColumnSize, rightZoomPosition - 3, 0.0001))
+            return RIGHT_COLUMN;
+      }
+
+      return null;
+   }
+
+   /**
+    * Zoom (or unzoom if invoked on an already-zoomed) column
+    *
+    * @param columnId
+    */
+   public void zoomColumn(String columnId)
+   {
+      PaneConfig config = getCurrentConfig();
+      boolean sidebarOnRight = sidebar_ != null && panel_.hasSidebarWidget() &&
+                               !"left".equals(config.getSidebarLocation());
+      boolean sidebarOnLeft = sidebar_ != null && panel_.hasSidebarWidget() &&
+                              "left".equals(config.getSidebarLocation());
+
+      double rightTargetSize;
+      double sidebarTargetSize = -1;
+      ArrayList<Double> leftTargetSize = new ArrayList<>();
+
+      String currentZoomedColumn = getZoomedColumn();
+      boolean unZooming = false;
+
+      if (StringUtil.equals(currentZoomedColumn, columnId))
+      {
+         if (widgetSizePriorToZoom_ < 0 ||
+            (leftWidgetSizePriorToZoom_.size() != additionalSourceCount_))
+         {
+            // no prior position to restore to, just show defaults
+            restoreColumnLayout();
+            return;
+         }
+         rightTargetSize = widgetSizePriorToZoom_;
+         for (Double s : leftWidgetSizePriorToZoom_)
+            leftTargetSize.add(s);
+         if ((sidebarOnRight || sidebarOnLeft) && sidebarSizePriorToZoom_ >= 0)
+            sidebarTargetSize = sidebarSizePriorToZoom_;
+         unZooming = true;
+      }
+      else if (StringUtil.equals(columnId, LEFT_COLUMN))
+      {
+         rightTargetSize = 0.0;
+         if (sidebarOnRight || sidebarOnLeft)
+            sidebarTargetSize = 0.0;
+      }
+      else if (StringUtil.equals(columnId, RIGHT_COLUMN))
+      {
+         rightTargetSize = panel_.getOffsetWidth();
+         if (sidebarOnRight)
+         {
+            // When zooming right with sidebar on right, collapse sidebar to 0
+            // and use 0 in the calculation (not the old sidebar width)
+            sidebarTargetSize = 0.0;
+            rightTargetSize -= sidebarTargetSize;  // Subtract 0, so full width
+         }
+         else if (sidebarOnLeft)
+         {
+            // When zooming right with sidebar on left, collapse sidebar to 0
+            sidebarTargetSize = 0.0;
+         }
+      }
+      else if (StringUtil.equals(columnId, SIDEBAR_COLUMN))
+      {
+         // When zooming sidebar, collapse all other columns
+         rightTargetSize = 0.0;
+         if (sidebarOnRight || sidebarOnLeft)
+         {
+            // Expand sidebar to full width
+            sidebarTargetSize = panel_.getOffsetWidth();
+         }
+         else
+         {
+            // No sidebar visible, cannot zoom it
+            Debug.logWarning("Cannot zoom sidebar when it is not visible");
+            return;
+         }
+      }
+      else
+      {
+         Debug.logWarning("Unexpected column identifier: " + columnId);
+         return;
+      }
+      // Currently we cannot zoom on left widgets
+      if (!unZooming)
+      {
+         for (int i=0; i<leftList_.size(); i++)
+            leftTargetSize.add(0.0);
+      }
+
+      if (rightTargetSize < 0)
+         rightTargetSize = 0.0;
+      for (int i = 0; i < leftTargetSize.size(); i++)
+      {
+         if (leftTargetSize.get(i) < 0)
+            leftTargetSize.set(i, 0.0);
+      }
+
+      if (unZooming)
+      {
+         widgetSizePriorToZoom_ = -1;
+         sidebarSizePriorToZoom_ = -1;
+         leftWidgetSizePriorToZoom_.clear();
+      }
+      else
+      {
+         if (widgetSizePriorToZoom_ < 0)
+         {
+            // right_ is always EAST, so getWidgetSize works in all cases
+            widgetSizePriorToZoom_ = panel_.getWidgetSize(right_);
+         }
+         if ((sidebarOnRight || sidebarOnLeft) && sidebarSizePriorToZoom_ < 0)
+            sidebarSizePriorToZoom_ = sidebar_.getOffsetWidth();
+         if (leftWidgetSizePriorToZoom_.size() != leftList_.size())
+         {
+            for (Widget w : leftList_)
+               leftWidgetSizePriorToZoom_.add(panel_.getWidgetSize(w));
+         }
+      }
+
+      if (sidebarOnRight)
+         resizeHorizontallyWithSidebarOnRight(rightTargetSize, leftTargetSize, sidebarTargetSize, () -> manageLayoutCommands());
+      else if (sidebarOnLeft)
+         resizeHorizontallyWithSidebarOnLeft(rightTargetSize, leftTargetSize, sidebarTargetSize, () -> manageLayoutCommands());
+      else
+         resizeHorizontally(rightTargetSize, leftTargetSize, () -> manageLayoutCommands());
+   }
+
+   public LogicalWindow getZoomedWindow()
+   {
+      return maximizedWindow_;
+   }
+
+   public ConsolePane getConsole()
+   {
+      return consolePane_;
+   }
+
+   public WorkbenchTabPanel getOwnerTabPanel(Tab tab)
+   {
+      return tabToPanel_.get(tab);
+   }
+
+   public boolean isChatInSidebar()
+   {
+      PaneConfig config = getCurrentConfig();
+      JsArrayString sidebarTabs = config.getSidebar();
+      if (sidebarTabs == null)
+         return false;
+      for (int i = 0; i < sidebarTabs.length(); i++)
+      {
+         if (sidebarTabs.get(i).equals(Tab.Chat.name()))
+            return true;
+      }
+      return false;
+   }
+
+   /**
+    * Returns true when the Chat pane is visible in the sidebar and is the
+    * selected tab -- i.e., when a second click on the Assistant toolbar
+    * button would dismiss it. Chat in a quadrant panel is not considered
+    * "active" for this purpose because the button cannot dismiss it.
+    */
+   public boolean isChatActivatedInSidebar()
+   {
+      if (!isChatInSidebar())
+         return false;
+
+      if (sidebar_ == null)
+         return false;
+
+      if (!tabToIndex_.containsKey(Tab.Chat))
+         return false;
+
+      WorkbenchTabPanel panel = tabToPanel_.get(Tab.Chat);
+      if (panel == null)
+         return false;
+
+      // If another window is maximized over the sidebar, Chat is not visible
+      if (maximizedWindow_ != null)
+      {
+         LogicalWindow chatParent = panel.getParentWindow();
+         if (chatParent != null && !chatParent.equals(maximizedWindow_))
+            return false;
+      }
+
+      int chatIndex = tabToIndex_.get(Tab.Chat);
+      return panel.getSelectedIndex() == chatIndex;
+   }
+
+   public LogicalWindow getSourceLogicalWindow()
+   {
+      return sourceLogicalWindows_.get(0);
+   }
+
+   public LogicalWindow getConsoleLogicalWindow()
+   {
+      return panesByName_.get(PaneManager.CONSOLE_PANE);
+   }
+
+   public int syncAdditionalColumnCount(int count, boolean refreshDisplay)
+   {
+      // make sure additionalSourceCount_ is up to date
+      additionalSourceCount_ = sourceColumnManager_.getSize() - 1;
+
+      if (count == additionalSourceCount_)
+         return additionalSourceCount_;
+
+      if (count > additionalSourceCount_)
+      {
+         int difference = count - additionalSourceCount_;
+         for (int i = 0; i < difference; i++)
+         {
+            if (refreshDisplay)
+               createAndDisplaySourceColumn();
+            else
+               sourceColumnManager_.add();
+         }
+      }
+      else
+      {
+         ArrayList<String> removedColumns = sourceColumnManager_.consolidateColumns(count + 1);
+         if (refreshDisplay)
+         {
+            for (String name : removedColumns)
+               closeSourceWindow(name);
+         }
+      }
+      additionalSourceCount_ = sourceColumnManager_.getSize() - 1;
+      return additionalSourceCount_;
+   }
+
+   private void createAndDisplaySourceColumn()
+   {
+      ColumnName name = createSourceColumn();
+      Widget panel = createSourceColumnWindow(name.getName(), name.getAccessibleName());
+      panel_.addLeftWidget(panel);
+   }
+
+   private ColumnName createSourceColumn()
+   {
+      PaneConfig.addSourcePane();
+      ColumnName name = sourceColumnManager_.add();
+      additionalSourceCount_ = sourceColumnManager_.getSize() - 1;
+      return name;
+   }
+
+   private Widget createSourceColumnWindow(String name, String accessibleName)
+   {
+      if (panesByName_.get(name) != null)
+         return panesByName_.get(name).getNormal();
+      panesByName_.put(name, createSource(name, accessibleName, sourceColumnManager_.getWidget(name)));
+
+      PaneConfig paneConfig = getCurrentConfig();
+      userPrefs_.panes().setGlobalValue(PaneConfig.create(
+         JsArrayUtil.copy(paneConfig.getQuadrants()),
+         paneConfig.getTabSet1(),
+         paneConfig.getTabSet2(),
+         paneConfig.getHiddenTabSet(),
+         paneConfig.getConsoleLeftOnTop(),
+         paneConfig.getConsoleRightOnTop(),
+         additionalSourceCount_,
+         paneConfig.getSidebar(),
+         paneConfig.getSidebarVisible(),
+         paneConfig.getSidebarLocation()).cast());
+      userPrefs_.writeUserPrefs();
+
+      return panesByName_.get(name).getNormal();
+   }
+
+   @SuppressWarnings("unlikely-arg-type")
+   public void closeSourceWindow(String name)
+   {
+      // hide the original source window
+      if (StringUtil.equals(name, SourceColumnManager.MAIN_SOURCE_NAME))
+         getSourceLogicalWindow().onWindowStateChange(
+               new WindowStateChangeEvent(WindowState.HIDE));
+      else
+      {
+         SourceColumn column = sourceColumnManager_.getByName(name);
+         if (column != null)
+            sourceColumnManager_.closeColumn(column, true);
+
+         for (LogicalWindow window : sourceLogicalWindows_)
+         {
+            if (window.equals(panesByName_.get(name)))
+            {
+               leftList_.remove(window);
+               panesByName_.remove(name);
+               panel_.removeLeftWidget(window.getNormal());
+               sourceLogicalWindows_.remove(window);
+               break;
+            }
+         }
+
+         additionalSourceCount_ = sourceColumnManager_.getSize() - 1;
+         PaneConfig paneConfig = getCurrentConfig();
+         userPrefs_.panes().setGlobalValue(PaneConfig.create(
+            JsArrayUtil.copy(paneConfig.getQuadrants()),
+            paneConfig.getTabSet1(),
+            paneConfig.getTabSet2(),
+            paneConfig.getHiddenTabSet(),
+            paneConfig.getConsoleLeftOnTop(),
+            paneConfig.getConsoleRightOnTop(),
+            additionalSourceCount_,
+            paneConfig.getSidebar(),
+            paneConfig.getSidebarVisible(),
+            paneConfig.getSidebarLocation()).cast());
+         userPrefs_.writeUserPrefs();
+      }
+   }
+
+   private DualWindowLayoutPanel createSplitWindow(LogicalWindow top,
+                                                   LogicalWindow bottom,
+                                                   String name,
+                                                   double bottomDefaultPct,
+                                                   int splitterSize)
+   {
+      return new DualWindowLayoutPanel(
+            eventBus_,
+            top,
+            bottom,
+            session_,
+            name,
+            WindowState.NORMAL,
+            (int) (Window.getClientHeight()*bottomDefaultPct),
+            splitterSize);
+   }
+
+   private LogicalWindow createConsole()
+   {
+      String frameName = PaneManager.CONSOLE_PANE;
+      
+      PrimaryWindowFrame frame = new PrimaryWindowFrame(frameName, null);
+      frame.setTitleWidget(new ConsoleInterpreterVersion());
+
+      ToolbarButton goToWorkingDirButton =
+            commands_.goToWorkingDir().createToolbarButton();
+      goToWorkingDirButton.addStyleName(
+            ThemeResources.INSTANCE.themeStyles().windowFrameToolbarButton());
+
+      LogicalWindow logicalWindow =
+            new LogicalWindow(frame, new MinimizedWindowFrame(frameName, frameName));
+
+      consoleTabPanel_ = new ConsoleTabPanel(
+            frame,
+            logicalWindow,
+            consolePane_,
+            compilePdfTab_,
+            findOutputTab_,
+            sourceCppTab_,
+            renderRmdTab_,
+            deployContentTab_,
+            markersTab_,
+            terminalTab_,
+            eventBus_,
+            goToWorkingDirButton,
+            testsTab_,
+            dataTab_,
+            jobsTab_,
+            launcherJobsTab_);
+
+      consoleTabPanel_.addLayoutStyles(frame.getElement());
+
+      return logicalWindow;
+   }
+
+   private LogicalWindow createSource(String frameName, String accessibleName, Widget display)
+   {
+      boolean showMinMaxButtons = StringUtil.equals(frameName, SourceColumnManager.MAIN_SOURCE_NAME);
+      WindowFrame sourceFrame = new WindowFrame(frameName, accessibleName, showMinMaxButtons);
+      sourceFrame.setFillWidget(display);
+      LogicalWindow sourceWindow = new LogicalWindow(
+            sourceFrame,
+            new MinimizedWindowFrame(frameName, accessibleName));
+      sourceWindow.transitionToState(WindowState.NORMAL);
+      sourceLogicalWindows_.add(sourceWindow);
+      return sourceWindow;
+   }
+
+   private
+         Triad<LogicalWindow, WorkbenchTabPanel, MinimizedModuleTabLayoutPanel>
+         createTabSet(String persisterName, ArrayList<Tab> tabs)
+   {
+      // For sidebar, show maximize (for zoom) and close buttons; other tabsets show maximize and minimize
+      boolean isSidebar = StringUtil.equals(persisterName, UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR);
+      boolean showMaximizeButton = true;  // All tabsets get maximize button
+      boolean showMinimizeButton = !isSidebar;  // Sidebar doesn't get minimize button
+      final WindowFrame frame = new WindowFrame(persisterName, persisterName, showMaximizeButton, showMinimizeButton, isSidebar);
+      final MinimizedModuleTabLayoutPanel minimized = new MinimizedModuleTabLayoutPanel(persisterName);
+      final LogicalWindow logicalWindow = new LogicalWindow(frame, minimized);
+
+      // Wire sidebar button handlers
+      if (isSidebar)
+      {
+         frame.setMaximizeClickHandler(() -> commands_.layoutZoomSidebar().execute());
+         frame.setCloseClickHandler(() -> setSidebarPref(false));
+      }
+
+      // Only pass commands to sidebar for the empty state feature
+      final WorkbenchTabPanel tabPanel = new WorkbenchTabPanel(frame, logicalWindow, persisterName,
+         isSidebar, isSidebar ? commands_ : null);
+
+      if (StringUtil.equals(persisterName, UserPrefsAccessor.Panes.QUADRANTS_TABSET1))
+         tabs1_ = tabs;
+      else if (StringUtil.equals(persisterName, UserPrefsAccessor.Panes.QUADRANTS_TABSET2))
+         tabs2_ = tabs;
+      else if (StringUtil.equals(persisterName, UserPrefsAccessor.Panes.QUADRANTS_HIDDENTABSET))
+         hiddenTabs_ = tabs;
+
+      populateTabPanel(tabs, tabPanel, minimized);
+
+      frame.setFillWidget(tabPanel);
+
+      minimized.addSelectionHandler(integerSelectionEvent ->
+      {
+         int tab = integerSelectionEvent.getSelectedItem();
+         tabPanel.selectTab(tab);
+      });
+
+      tabPanel.addSelectionHandler(integerSelectionEvent ->
+      {
+         int index = integerSelectionEvent.getSelectedItem();
+         WorkbenchTab selected = tabPanel.getTab(index);
+         lastSelectedTab_ = workbenchTabToTab(selected);
+         session_.persistClientState();
+         eventBus_.fireEvent(new ChatPaneActiveEvent(isChatActivatedInSidebar()));
+      });
+
+      if (!StringUtil.equals(persisterName, UserPrefsAccessor.Panes.QUADRANTS_HIDDENTABSET))
+         new SelectedTabStateValue(persisterName, tabPanel);
+
+      return new Triad<>(
+         logicalWindow,
+         tabPanel,
+         minimized);
+   }
+
+   private Tab workbenchTabToTab(WorkbenchTab tab)
+   {
+      return wbTabToTab_.get(tab);
+   }
+
+   private void populateTabPanel(ArrayList<Tab> tabs,
+                                 WorkbenchTabPanel tabPanel,
+                                 MinimizedModuleTabLayoutPanel minimized)
+   {
+      ArrayList<WorkbenchTab> tabList = new ArrayList<>();
+      int tabIdx = 0;
+      for (Tab tab : tabs)
+      {
+         WorkbenchTab wbTab = getTab(tab);
+
+         wbTabToTab_.put(wbTab, tab);
+         tabToPanel_.put(tab, tabPanel);
+
+         // exclude suppressed tabs from the index since they aren't added to
+         // the panel
+         if (!wbTab.isSuppressed())
+            tabToIndex_.put(tab, tabIdx++);
+
+         tabList.add(wbTab);
+      }
+      tabPanel.setTabs(tabList);
+
+      ArrayList<String> labels = new ArrayList<>();
+      for (Tab tab : tabs)
+      {
+         if (!getTab(tab).isSuppressed())
+            labels.add(getTabLabel(tab));
+      }
+      minimized.setTabs(labels.toArray(new String[labels.size()]));
+   }
+
+   private String getTabLabel(Tab tab)
+   {
+      switch (tab)
+      {
+         case VCS:
+         case Presentation:
+         // The "Presentations" tab should always be displayed as "Presentation" (since 
+         // the tab only shows a single presentation at a time. We named it "Presentations"
+         // under the hood so it wouldn't conflict in config with the existing 
+         // Presentation tab
+         case Presentations:
+         case Connections:
+            return getTab(tab).getTitle();
+         default:
+            return tab.toString();
+      }
+   }
+
+   private Tab tabForName(String name)
+   {
+      if (name.equalsIgnoreCase(HISTORY_PANE))
+         return Tab.History;
+      if (name.equalsIgnoreCase(FILES_PANE))
+         return Tab.Files;
+      if (name.equalsIgnoreCase(PLOTS_PANE))
+         return Tab.Plots;
+      if (name.equalsIgnoreCase(PACKAGES_PANE))
+         return Tab.Packages;
+      if (name.equalsIgnoreCase(HELP_PANE))
+         return Tab.Help;
+      if (name.equalsIgnoreCase(VCS_PANE))
+         return Tab.VCS;
+      if (name.equalsIgnoreCase(TUTORIAL_PANE))
+         return Tab.Tutorial;
+      if (name.equalsIgnoreCase(CHAT_PANE))
+         return Tab.Chat;
+      if (name.equalsIgnoreCase(BUILD_PANE))
+         return Tab.Build;
+      if (name.equalsIgnoreCase(PRESENTATION_PANE))
+         return Tab.Presentation;
+      if (name.equalsIgnoreCase(PRESENTATIONS_PANE))
+         return Tab.Presentations;
+      if (name.equalsIgnoreCase(ENVIRONMENT_PANE))
+         return Tab.Environment;
+      if (name.equalsIgnoreCase(VIEWER_PANE))
+         return Tab.Viewer;
+      if (name.equalsIgnoreCase(CONNECTIONS_PANE))
+         return Tab.Connections;
+      if (name.equalsIgnoreCase(UserPrefsAccessor.Panes.QUADRANTS_SOURCE))
+         return Tab.Source;
+      if (name.equalsIgnoreCase(CONSOLE_PANE))
+         return Tab.Console;
+      if (name.equalsIgnoreCase(SOURCE_COLUMN))
+         return Tab.SourceColumn;
+
+      return null;
+   }
+
+   private AppCommand getLayoutCommandForTab(Tab tab)
+   {
+      if (tab == null)
+         return commands_.layoutEndZoom();
+
+      switch (tab)
+      {
+      case Build:        return commands_.layoutZoomBuild();
+      case Console:      return commands_.layoutZoomConsole();
+      case Environment:  return commands_.layoutZoomEnvironment();
+      case Files:        return commands_.layoutZoomFiles();
+      case Help:         return commands_.layoutZoomHelp();
+      case History:      return commands_.layoutZoomHistory();
+      case Packages:     return commands_.layoutZoomPackages();
+      case Plots:        return commands_.layoutZoomPlots();
+      case Source:       return commands_.layoutZoomSource();
+      case SourceColumn: return commands_.layoutZoomSource();
+      case VCS:          return commands_.layoutZoomVcs();
+      case Tutorial:     return commands_.layoutZoomTutorial();
+      case Chat:         return commands_.layoutZoomChat();
+      case Viewer:       return commands_.layoutZoomViewer();
+      case Connections:  return commands_.layoutZoomConnections();
+      case Presentations: return commands_.layoutZoomPresentation2();
+      default:
+         throw new IllegalArgumentException("Unexpected tab '" + tab.toString() + "'");
+      }
+   }
+
+   private void manageLayoutCommands()
+   {
+      List<AppCommand> layoutCommands = getLayoutCommands();
+      AppCommand activeCommand = getLayoutCommandForTab(maximizedTab_);
+
+      for (AppCommand command : layoutCommands)
+         command.setChecked(activeCommand.equals(command));
+
+      // manage console left/right commands
+      boolean maximized = maximizedTab_ != null;
+      commands_.layoutConsoleOnLeft().setVisible(!maximized);
+      commands_.layoutConsoleOnRight().setVisible(!maximized);
+      if (!maximized)
+      {
+         PaneConfig config = getCurrentConfig();
+         commands_.layoutConsoleOnLeft().setChecked(config.getConsoleLeft());
+         commands_.layoutConsoleOnRight().setChecked(config.getConsoleRight());
+      }
+      else
+      {
+         commands_.layoutConsoleOnLeft().setVisible(false);
+         commands_.layoutConsoleOnRight().setVisible(false);
+      }
+
+      manageSidebarCommands();
+      manageZoomColumnCommands();
+   }
+
+   private void manageZoomColumnCommands()
+   {
+      boolean zoomLeftChecked = false;
+      boolean zoomRightChecked = false;
+      boolean zoomSidebarChecked = false;
+
+      String column = getZoomedColumn();
+      if (StringUtil.equals(column, LEFT_COLUMN))
+         zoomLeftChecked = true;
+      else if (StringUtil.equals(column, RIGHT_COLUMN))
+         zoomRightChecked = true;
+      else if (StringUtil.equals(column, SIDEBAR_COLUMN))
+         zoomSidebarChecked = true;
+
+      commands_.layoutZoomLeftColumn().setChecked(zoomLeftChecked);
+      commands_.layoutZoomRightColumn().setChecked(zoomRightChecked);
+      commands_.layoutZoomSidebar().setChecked(zoomSidebarChecked);
+
+      PaneConfig config = getCurrentConfig();
+      boolean isSidebarVisible = config.getSidebarVisible();
+      commands_.layoutZoomSidebar().setEnabled(isSidebarVisible);
+      // The right column can't be zoomed while an exclusive-mode sidebar is
+      // covering it -- there's nothing to zoom.
+      commands_.layoutZoomRightColumn().setEnabled(!panel_.isRightWidgetHidden());
+
+      // Update sidebar maximize button state to reflect zoom state
+      LogicalWindow sidebarWindow = panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_SIDEBAR);
+      if (sidebarWindow != null)
+      {
+         WindowFrame sidebarFrame = sidebarWindow.getNormal();
+         if (sidebarFrame != null)
+         {
+            sidebarFrame.setMaximizedDependentState(
+               zoomSidebarChecked ? WindowState.MAXIMIZE : WindowState.NORMAL);
+         }
+      }
+   }
+
+   private void manageSidebarCommands()
+   {
+      PaneConfig config = getCurrentConfig();
+      boolean isSidebarVisible = config.getSidebarVisible();
+
+      commands_.focusSidebarSeparator().setEnabled(isSidebarVisible);
+   }
+
+   private void manageChatCommands()
+   {
+      boolean showPaiUi = paiUtil_.isPositAssistantEnabled() && !isTabHidden(Tab.Chat);
+      commands_.activateChat().setVisible(showPaiUi);
+      commands_.layoutZoomChat().setVisible(showPaiUi);
+      // The RAI terminal is the sole Assistant surface regardless of the
+      // legacy chatProvider pref (Phase 0 decoupling) -- this is a UI
+      // visibility gate on that legacy pref, not a security gate.
+      commands_.assistantPaneToggle().setVisible(showPaiUi);
+   }
+
+   private boolean isTabHidden(Tab tab)
+   {
+      WorkbenchTabPanel panel = getOwnerTabPanel(tab);
+      if (panel == null)
+         return true;
+      LogicalWindow parent = panel.getParentWindow();
+      if (parent == null)
+         return true;
+      return parent == panesByName_.get(UserPrefsAccessor.Panes.QUADRANTS_HIDDENTABSET);
+   }
+
+   private List<AppCommand> getLayoutCommands()
+   {
+      List<AppCommand> commands = new ArrayList<>();
+
+      commands.add(commands_.layoutEndZoom());
+      commands.add(commands_.layoutZoomBuild());
+      commands.add(commands_.layoutZoomConsole());
+      commands.add(commands_.layoutZoomEnvironment());
+      commands.add(commands_.layoutZoomFiles());
+      commands.add(commands_.layoutZoomHelp());
+      commands.add(commands_.layoutZoomHistory());
+      commands.add(commands_.layoutZoomPackages());
+      commands.add(commands_.layoutZoomPlots());
+      commands.add(commands_.layoutZoomSource());
+      commands.add(commands_.layoutZoomVcs());
+      commands.add(commands_.layoutZoomTutorial());
+      commands.add(commands_.layoutZoomViewer());
+      commands.add(commands_.layoutZoomConnections());
+      commands.add(commands_.layoutZoomPresentation2());
+      if (paiUtil_.isPositAssistantEnabled())
+         commands.add(commands_.layoutZoomChat());
+
+      return commands;
+   }
+
+   private int getColumnCount()
+   {
+      return additionalSourceCount_ + 2;
+   }
+
+   private PaneConfig getCurrentConfig()
+   {
+      PaneConfig config = userPrefs_.panes().getValue().cast();
+
+      // use default config if pref isn't set yet
+      if (config == null)
+         return PaneConfig.createDefault();
+
+      return config;
+   }
+
+   private void clearFocusIndicator()
+   {
+      if (lastFocusedWindow_ != null)
+      {
+         lastFocusedWindow_.showWindowFocusIndicator(false);
+         lastFocusedWindow_ = null;
+      }
+   }
+
+   private final EventBus eventBus_;
+   private final Session session_;
+   private final Commands commands_;
+   private final UserPrefs userPrefs_;
+   private final PaiUtil paiUtil_;
+   private final FindOutputTab findOutputTab_;
+   private final WorkbenchTab compilePdfTab_;
+   private final WorkbenchTab sourceCppTab_;
+   private final ConsolePane consolePane_;
+   private final FileTypeRegistry fileTypeRegistry_;
+   private final Source source_;
+   private final SourceColumnManager sourceColumnManager_;
+   private final WorkbenchTab historyTab_;
+   private final WorkbenchTab filesTab_;
+   private final WorkbenchTab plotsTab_;
+   private final WorkbenchTab packagesTab_;
+   private final WorkbenchTab helpTab_;
+   private final WorkbenchTab vcsTab_;
+   private final WorkbenchTab buildTab_;
+   private final WorkbenchTab presentationTab_;
+   private final WorkbenchTab presentation2Tab_;
+   private final WorkbenchTab connectionsTab_;
+   private final WorkbenchTab environmentTab_;
+   private final WorkbenchTab viewerTab_;
+   private final WorkbenchTab renderRmdTab_;
+   private final WorkbenchTab deployContentTab_;
+   private final MarkersOutputTab markersTab_;
+   private final WorkbenchTab terminalTab_;
+   private final WorkbenchTab testsTab_;
+   private final WorkbenchTab jobsTab_;
+   private final WorkbenchTab launcherJobsTab_;
+   private final WorkbenchTab dataTab_;
+   private final WorkbenchTab tutorialTab_;
+   private final WorkbenchTab chatTab_;
+   private final OptionsLoader.Shim optionsLoader_;
+   private final Provider<GlobalDisplay> pGlobalDisplay_;
+   private final MainSplitPanel panel_;
+   private final ArrayList<LogicalWindow> sourceLogicalWindows_ = new ArrayList<>();
+   private final HashMap<Tab, WorkbenchTabPanel> tabToPanel_ = new HashMap<>();
+   private final HashMap<Tab, Integer> tabToIndex_ = new HashMap<>();
+   private final HashMap<WorkbenchTab, Tab> wbTabToTab_ = new HashMap<>();
+   private HashMap<String, LogicalWindow> panesByName_;
+   private final DualWindowLayoutPanel center_;
+   private final DualWindowLayoutPanel right_;
+   private final ArrayList<Widget> leftList_ = new ArrayList<>();
+   private ArrayList<LogicalWindow> panes_;
+   private ConsoleTabPanel consoleTabPanel_;
+   private WorkbenchTabPanel tabSet1TabPanel_;
+   private MinimizedModuleTabLayoutPanel tabSet1MinPanel_;
+   private WorkbenchTabPanel tabSet2TabPanel_;
+   private MinimizedModuleTabLayoutPanel tabSet2MinPanel_;
+   private WorkbenchTabPanel hiddenTabSetTabPanel_;
+   private MinimizedModuleTabLayoutPanel hiddenTabSetMinPanel_;
+   private Widget sidebar_;
+   // The tab list the currently-cached sidebar tabset was created with; used to
+   // decide whether showSidebar(true) can un-hide the existing widget in place
+   // (Assistant terminal session preserved) or must recreate it (tabs changed).
+   private ArrayList<Tab> sidebarTabsCreated_;
+   private PaneConfig previousPaneConfig_;
+
+   // Zoom-related members ----
+   private Tab lastSelectedTab_ = null;
+   private LogicalWindow maximizedWindow_ = null;
+   private LogicalWindow lastFocusedWindow_ = null;
+   private Tab maximizedTab_ = null;
+   private double widgetSizePriorToZoom_ = -1;
+   private double sidebarSizePriorToZoom_ = -1;
+   private boolean isAnimating_ = false;
+   private final ArrayList<Double> leftWidgetSizePriorToZoom_ = new ArrayList<>();
+
+   private ArrayList<Tab> tabs1_;
+   private ArrayList<Tab> tabs2_;
+   private ArrayList<Tab> hiddenTabs_;
+
+   private int additionalSourceCount_; // this does not include the main source
+   public final static int MAX_COLUMN_COUNT = 3;
+   private static final UIConstants constants_ = GWT.create(UIConstants.class);
+   private static final ConsoleConstants consoleConstants_ = GWT.create(ConsoleConstants.class);
+
+   // Internal identifiers for the workbench tabs
+   public static final String CONSOLE_PANE = "Console"; //$NON-NLS-1$
+   public static final String HISTORY_PANE = "History"; //$NON-NLS-1$
+   public static final String FILES_PANE = "Files"; //$NON-NLS-1$
+   public static final String PLOTS_PANE = "Plots"; //$NON-NLS-1$
+   public static final String PACKAGES_PANE = "Packages"; //$NON-NLS-1$
+   public static final String HELP_PANE = "Help"; //$NON-NLS-1$
+   public static final String VCS_PANE = "VCS"; //$NON-NLS-1$
+   public static final String BUILD_PANE = "Build"; //$NON-NLS-1$
+   public static final String PRESENTATION_PANE = "Presentation"; //$NON-NLS-1$
+   public static final String PRESENTATIONS_PANE = "Presentations"; //$NON-NLS-1$
+   public static final String CONNECTIONS_PANE = "Connections"; //$NON-NLS-1$
+   public static final String ENVIRONMENT_PANE = "Environment"; //$NON-NLS-1$
+   public static final String VIEWER_PANE = "Viewer"; //$NON-NLS-1$
+   public static final String COMPILE_PDF_PANE = "Compile PDF"; //$NON-NLS-1$
+   public static final String SOURCE_CPP_PANE = "Source Cpp"; //$NON-NLS-1$
+   public static final String RMARKDOWN_PANE = "R Markdown"; //$NON-NLS-1$
+   public static final String DEPLOY_PANE = "Deploy"; //$NON-NLS-1$
+   public static final String TERMINAL_PANE = "Terminal"; //$NON-NLS-1$
+   public static final String TESTS_PANE = "Tests"; //$NON-NLS-1$
+   public static final String JOBS_PANE = "Jobs"; //$NON-NLS-1$
+   public static final String LAUNCHER_PANE = "Launcher"; //$NON-NLS-1$
+   public static final String DATA_OUTPUT_PANE = "Data Output"; //$NON-NLS-1$
+   public static final String TUTORIAL_PANE = "Tutorial"; //$NON-NLS-1$
+   public static final String CHAT_PANE = "Chat"; //$NON-NLS-1$
+   public static final String SOURCE_COLUMN = "SourceColumn"; //$NON-NLS-1$
+   public static final String FIND_PANE = "Find"; //$NON-NLS-1$
+   public static final String MARKERS_PANE = "Markers"; //$NON-NLS-1$
+}

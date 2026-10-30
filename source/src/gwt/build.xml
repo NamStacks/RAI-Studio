@@ -1,0 +1,600 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+#
+# build.xml
+#
+# Copyright (C) 2022 by Posit Software, PBC
+#
+# This program is licensed to you under the terms of version 3 of the
+# GNU Affero General Public License. This program is distributed WITHOUT
+# ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+# MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+# AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+#
+-->
+
+<project name="client" default="build" basedir=".">
+
+   <!-- Java version -->
+   <property name="javac.version" value="17"/>
+
+   <!-- Helper for compiling Java sources -->
+   <macrodef name="java-compile">
+      <attribute name="srcdir"/>
+      <attribute name="includes"/>
+      <attribute name="nowarn" default="true"/>
+      <attribute name="deprecation" default="true"/>
+      <element name="elements" implicit="yes"/>
+      <sequential>
+         <javac srcdir="@{srcdir}"
+                destdir="${build.dir}"
+                includes="@{includes}"
+                source="${javac.version}"
+                target="${javac.version}"
+                encoding="utf-8"
+                nowarn="@{nowarn}"
+                debug="true"
+                debuglevel="lines,vars,source"
+                deprecation="@{deprecation}"
+                includeantruntime="false">
+            <classpath refid="project.class.path"/>
+            <elements/>
+         </javac>
+      </sequential>
+   </macrodef>
+
+   <!-- Helper for setting paths from multiple potential locations -->
+   <macrodef name="set-if-exists">
+      <attribute name="property"/>
+      <attribute name="value"/>
+      <sequential>
+         <pathconvert property="@{value}.normalized">
+            <path location="@{value}"/>
+         </pathconvert>
+         <condition property="@{property}" value="${@{value}.normalized}">
+            <and>
+               <not><isset property="@{property}"/></not>
+               <available file="${@{value}.normalized}"/>
+            </and>
+         </condition>
+      </sequential>
+   </macrodef>
+
+   <!-- Helper for setting a property if it hasn't yet been defined -->
+   <macrodef name="set-if-unset">
+      <attribute name="property"/>
+      <attribute name="value"/>
+      <sequential>
+         <condition property="@{property}" value="@{value}">
+            <not><isset property="@{property}"/></not>
+         </condition>
+      </sequential>
+   </macrodef>
+
+   <!-- configure dirs -->
+   <property name="src.dir" value="./src"/>        <!-- main Java sources -->
+   <property name="test.dir" value="./test"/>      <!-- Java sources for tests -->
+   <property name="www.dir" value="./www"/>        <!-- output folder for www artifacts (HTML, etc.) -->
+   <property name="build.dir" value="./bin"/>      <!-- output folder for compiled classes -->
+   <property name="tools.dir" value="./tools"/>    <!-- other tools -->
+   <property name="extras.dir" value="./extras"/>  <!-- extras: symbol maps, etc. -->
+   <property name="gwt.xmx" value="-Xmx1536M"/>    <!-- set maximum Java heap size -->
+   <property name="gwt.xss" value="-Xss16M"/>      <!-- set java thread stack size -->
+
+   <!-- Path where acesupport files should be generated -->
+   <property name="ace.bin" value="${src.dir}/org/rstudio/studio/client/workbench/views/source/editors/text/ace"/>
+
+   <!-- For automatically re-generating acesupport on change -->
+   <property name="acesupport.watcher.dir" value="${tools.dir}/acesupport-watcher"/>
+
+   <!-- Detect git worktree and resolve main repo root for shared dependencies -->
+   <exec executable="git" outputproperty="git.common.dir"
+         failonerror="false" errorproperty="git.common.dir.error">
+      <arg value="rev-parse"/>
+      <arg value="--path-format=absolute"/>
+      <arg value="--git-common-dir"/>
+   </exec>
+   <dirname property="git.main.worktree" file="${git.common.dir}"/>
+
+   <!-- Environment variables (e.g. env.RSTUDIO_TOOLS_ROOT) -->
+   <property environment="env"/>
+
+   <!-- Path to GWT libraries -->
+   <set-if-exists property="lib.dir" value="${env.RSTUDIO_TOOLS_ROOT}/dependencies/common/gwtproject"/>
+   <set-if-exists property="lib.dir" value="../../dependencies/common/gwtproject"/>
+   <set-if-exists property="lib.dir" value="${git.main.worktree}/dependencies/common/gwtproject"/>
+   <set-if-exists property="lib.dir" value="/opt/rstudio-tools/dependencies/common/gwtproject"/>
+   <set-if-exists property="lib.dir" value="${env.SYSTEMDRIVE}/rstudio-tools/dependencies/common/gwtproject"/>
+   <set-if-exists property="lib.dir" value="C:/rstudio-tools/dependencies/common/gwtproject"/>
+
+   <!-- Configure path to GWT SDK -->
+   <property name="gwt.sdk" value="${lib.dir}/gwt/gwt-rstudio"/>
+   <property name="gwt.extra.args" value=""/>
+   <property name="gwt.style" value=""/>
+   <property name="gwt.main.module" value="org.rstudio.studio.RStudio"/>
+
+   <!-- Translate the single-token gwt.style value (e.g. "PRETTY", passed in
+        by CMake from the GWT_STYLE env var) into a "-style X" compiler
+        argument. Assembling the argument here, rather than threading the
+        space-containing "-style PRETTY" string through CMake, keeps the space
+        inside Ant and avoids shell-escaping issues across the CMake boundary. -->
+   <condition property="gwt.style.args" value="-style ${gwt.style}">
+      <length string="${gwt.style}" trim="true" when="greater" length="0"/>
+   </condition>
+   <property name="gwt.style.args" value=""/>
+
+   <!-- Configure code server -->
+   <property name="bind.address" value="127.0.0.1"/>
+
+   <!-- Task for compiling JavaScript support sources -->
+   <taskdef name="jscomp"
+            classname="com.google.javascript.jscomp.ant.CompileTask"
+            classpath="${tools.dir}/compiler/compiler.jar"/>
+
+   <!-- Set up Java classpath -->
+   <path id="project.class.path">
+      <pathelement location="${build.dir}"/>
+      <fileset dir="${gwt.sdk}" includes="*.jar"/>
+      <fileset dir="${lib.dir}/gin/2.1.2" includes="*.jar"/>
+      <fileset dir="${lib.dir}/elemental2" includes="*.jar"/>
+      <fileset dir="${lib.dir}/jsinterop" includes="*.jar"/>
+      <fileset dir="${lib.dir}/jspecify" includes="*.jar"/>
+   </path>
+
+   <path id="test.class.path">
+      <pathelement location="{build.dir}"/>
+   </path>
+
+   <path id="unittest.class.path">
+       <fileset dir="${lib.dir}/" includes="*.jar"/>
+   </path>
+
+   <fileset id="acesupport.sources.fileset" dir="${src.dir}/../acesupport">
+      <include name="**/*.js"/>
+      <exclude name="extern.js"/>
+   </fileset>
+
+   <path id="acesupport.sources">
+      <fileset refid="acesupport.sources.fileset"/>
+   </path>
+
+   <target name="ext">
+
+      <jscomp compilationLevel="simple" warning="default"
+              debug="false" output="${ace.bin}/acesupport.js">
+
+          <externs dir="${src.dir}/../acesupport">
+             <file name="extern.js"/>
+          </externs>
+
+          <path refid="acesupport.sources"/>
+
+      </jscomp>
+   </target>
+
+   <target name="acesupport" description="Compile (debugging) Ace support">
+      <concat destfile="${ace.bin}/acesupport.js">
+         <fileset refid="acesupport.sources.fileset"/>
+      </concat>
+      <echo>Concatenated acesupport files to 'acesupport.js'</echo>
+   </target>
+
+   <!-- acesupport file watcher for development -->
+   <target name="acesupport-watch-install" description="Install acesupport watcher dependencies">
+      <retry retrycount="3">
+         <exec executable="${yarn.bin}" dir="${acesupport.watcher.dir}" resolveexecutable="true" failonerror="true">
+            <arg value="install"/>
+            <arg value="--network-timeout"/>
+            <arg value="240000"/>
+         </exec>
+      </retry>
+   </target>
+
+   <target name="acesupport-watch-check">
+      <available file="${acesupport.watcher.dir}/node_modules" type="dir" property="acesupport.watcher.installed"/>
+   </target>
+
+   <target name="acesupport-watch-install-if-needed" depends="acesupport-watch-check" unless="acesupport.watcher.installed">
+      <antcall target="acesupport-watch-install"/>
+   </target>
+
+   <!-- Kill any existing acesupport watcher using PID file -->
+   <property name="acesupport.watcher.pidfile" value="${acesupport.watcher.dir}/watcher.pid"/>
+
+   <target name="acesupport-watch-kill-windows" if="is.windows">
+      <exec executable="cmd" failonerror="false">
+         <arg value="/c"/>
+         <arg value="if exist &quot;${acesupport.watcher.pidfile}&quot; (for /f %p in (${acesupport.watcher.pidfile}) do taskkill /PID %p /F) 2>nul"/>
+      </exec>
+      <delete file="${acesupport.watcher.pidfile}" failonerror="false"/>
+   </target>
+
+   <target name="acesupport-watch-kill-unix" unless="is.windows">
+      <exec executable="sh" failonerror="false">
+         <arg value="-c"/>
+         <arg value="test -f '${acesupport.watcher.pidfile}' &amp;&amp; kill $(cat '${acesupport.watcher.pidfile}') 2>/dev/null; rm -f '${acesupport.watcher.pidfile}'"/>
+      </exec>
+   </target>
+
+   <target name="acesupport-watch-kill" description="Stop any running acesupport watcher">
+      <condition property="is.windows">
+         <os family="windows"/>
+      </condition>
+      <antcall target="acesupport-watch-kill-windows"/>
+      <antcall target="acesupport-watch-kill-unix"/>
+   </target>
+
+   <target name="acesupport-watch-windows" if="is.windows">
+      <exec executable="cmd" dir="${acesupport.watcher.dir}" spawn="true">
+         <arg value="/c"/>
+         <arg value="node"/>
+         <arg value="watch.js"/>
+      </exec>
+   </target>
+
+   <target name="acesupport-watch-unix" unless="is.windows">
+      <exec executable="node" dir="${acesupport.watcher.dir}" spawn="true">
+         <arg value="watch.js"/>
+      </exec>
+   </target>
+
+   <target name="acesupport-watch" depends="acesupport-watch-install-if-needed,acesupport-watch-kill" description="Start acesupport file watcher">
+      <condition property="is.windows">
+         <os family="windows"/>
+      </condition>
+      <antcall target="acesupport-watch-windows"/>
+      <antcall target="acesupport-watch-unix"/>
+      <echo>Started acesupport file watcher (background process)</echo>
+   </target>
+
+   <!-- panmirror typescript library -->
+   <!-- ensure version matches RSTUDIO_NODE_VERSION -->
+   <property name="node.version" value="22.22.2"/>
+   <set-if-exists property="node.dir" value="${env.RSTUDIO_TOOLS_ROOT}/dependencies/common/node/${node.version}"/>
+   <set-if-exists property="node.dir" value="../../dependencies/common/node/${node.version}"/>
+   <set-if-exists property="node.dir" value="${git.main.worktree}/dependencies/common/node/${node.version}"/>
+   <set-if-exists property="node.dir" value="/opt/rstudio-tools/dependencies/common/node/${node.version}"/>
+   <set-if-exists property="node.dir" value="${env.SYSTEMDRIVE}/rstudio-tools/dependencies/common/node/${node.version}"/>
+   <set-if-exists property="node.dir" value="C:/rstudio-tools/dependencies/common/node/${node.version}"/>
+   <set-if-unset  property="node.dir" value="../../dependencies/common/node/${node.version}"/>
+
+
+   <!-- use yarn from system but will prefer yarn from dependencies if available -->
+   <set-if-exists property="yarn.bin" value="${node.dir}/bin/yarn"/>
+   <set-if-exists property="yarn.bin" value="/opt/rstudio-tools/dependencies/common/node/${node.version}/bin/yarn"/>
+   <set-if-exists property="yarn.bin" value="${env.RSTUDIO_TOOLS_ROOT}/dependencies/common/node/${node.version}/node_modules/yarn/bin/yarn.cmd"/>
+   <set-if-exists property="yarn.bin" value="${env.SYSTEMDRIVE}/rstudio-tools/dependencies/common/node/${node.version}/node_modules/yarn/bin/yarn.cmd"/>
+   <set-if-exists property="yarn.bin" value="c:/rstudio-tools/dependencies/common/node/${node.version}/node_modules/yarn/bin/yarn.cmd"/>
+   <set-if-exists property="yarn.bin" value="${node.dir}/node_modules/yarn/bin/yarn.cmd"/>
+   <set-if-unset  property="yarn.bin" value="yarn"/>
+
+   <!-- similar lookup for panmirror -->
+   <set-if-exists property="panmirror.dir" value="/opt/rstudio-tools/src/gwt/lib/quarto/apps/panmirror"/>
+   <set-if-exists property="panmirror.dir" value="c:/rstudio-tools/src/gwt/lib/quarto/apps/panmirror"/>
+   <set-if-exists property="panmirror.dir" value="./lib/quarto/apps/panmirror"/>
+   <set-if-exists property="panmirror.dir" value="${git.main.worktree}/src/gwt/lib/quarto/apps/panmirror"/>
+   <!-- write panmirror to ${www.dir} so it tracks the same output tree as every
+        other ant target. cmake passes -Dwww.dir=<build>/gwt/www to redirect
+        ant output into the build tree; with the previous hardcoded ./www path
+        panmirror stayed in the source tree instead and dropped out of any
+        gwt-output cache that covered only the build tree, so cache-hit builds
+        (which skip the ant rebuild) shipped a package missing panmirror.js.
+        Standalone ant invocations and any build where www.dir is left at the
+        default resolve to ./www/js/panmirror, matching prior behavior. -->
+   <property name="panmirror.build.dir" value="${www.dir}/js/panmirror"/>
+
+   <target name="panmirror" description="Compile panmirror library">
+
+      <!-- Make sure a default value for panmirror.minify is set -->
+      <condition property="panmirror.minify" value="true">
+         <not>
+            <isset property="panmirror.minify" />
+         </not>
+      </condition>
+
+      <echo message="yarn location: ${yarn.bin}"/>
+      <echo message="panmirror location: ${panmirror.dir}"/>
+      <echo message="panmirror minify: ${panmirror.minify}"/>
+
+      <mkdir dir="${panmirror.build.dir}"/>
+      <retry retrycount="3">
+         <exec executable="${yarn.bin}" dir="${panmirror.dir}" resolveexecutable="true" failonerror="true">
+            <arg value="install"/>
+            <arg value="--network-timeout"/>
+            <arg value="240000"/>
+         </exec>
+      </retry>
+      <exec executable="${yarn.bin}" dir="${panmirror.dir}" resolveexecutable="true" failonerror="true">
+         <arg value="build"/>
+         <arg value="--minify"/>
+         <arg value="${panmirror.minify}"/>
+         <arg value="--sourcemap"/>
+         <arg value="true"/>
+         <env key="PANMIRROR_OUTDIR" value="dist-rstudio"/>
+         <!-- vite's minify+sourcemap pass on the vendored quarto/panmirror
+              editor can exceed Node's default V8 old-space heap on
+              memory-constrained CI runners (observed: Windows Server 2025
+              GitHub Actions runner, exit 134 "JavaScript heap out of
+              memory" mid Mark-Compact GC). Raise the heap ceiling for this
+              one build step only; macOS/Linux runners have not hit this
+              but the higher ceiling is harmless there too. -->
+         <env key="NODE_OPTIONS" value="--max-old-space-size=6144"/>
+      </exec>
+      <copy todir="${panmirror.build.dir}">
+         <fileset dir="${panmirror.dir}/dist-rstudio"/>
+      </copy>
+   </target>
+
+   <target name="javac" description="Compile java source">
+      <mkdir dir="${build.dir}"/>
+      <java-compile srcdir="${src.dir}" includes="com/google/**" deprecation="false">
+         <compilerarg value="-Xlint:-deprecation"/>
+      </java-compile>
+      <java-compile srcdir="${src.dir}" includes="org/rstudio/**">
+         <compilerarg value="-Xlint"/>
+      </java-compile>
+      <copy todir="${build.dir}">
+         <fileset dir="${src.dir}" excludes="**/*.java"/>
+      </copy>
+   </target>
+
+   <target name="gwtc" depends="ext,javac" description="GWT compile to JavaScript">
+      <antcall target="panmirror">
+         <param name="panmirror.target" value="ide-dist"/>
+      </antcall>
+      <java failonerror="true" fork="true" classname="com.google.gwt.dev.Compiler">
+         <classpath>
+            <pathelement location="${src.dir}"/>
+            <path refid="project.class.path"/>
+         </classpath>
+         <!-- add jvmarg -Xss16M or similar if you see a StackOverflowError -->
+         <jvmarg value="${gwt.xmx}"/>
+         <jvmarg value="${gwt.xss}"/>
+         <arg value="-war"/>
+         <arg value="${www.dir}"/>
+         <arg value="-localWorkers"/>
+         <arg value="2"/>
+         <arg value="-XdisableClassMetadata"/>
+         <arg value="-XdisableCastChecking"/>
+         <arg line="-sourceLevel ${javac.version}"/>
+         <arg line="-strict"/>
+         <arg line="-gen gen"/>
+         <arg line="${gwt.style.args}"/>
+         <arg line="-extra ${extras.dir}"/>
+         <arg line="-deploy ${extras.dir}"/>
+         <arg line="${gwt.extra.args}"/>
+         <arg value="-generateJsInteropExports"/>
+         <!-- Additional arguments like -logLevel DEBUG -->
+         <arg value="${gwt.main.module}"/>
+      </java>
+   </target>
+
+   <target name="soyc" description="Generate and show SOYC report">
+      <antcall target="gwtc">
+         <param name="gwt.main.module" value="org.rstudio.studio.RStudioDraft"/>
+         <param name="gwt.extra.args" value="${gwt.extra.args} -compileReport"/>
+      </antcall>
+      <exec executable="open" os="Mac OS X">
+         <arg file="${extras.dir}/rstudio/soycReport/compile-report/index.html"/>
+      </exec>
+   </target>
+
+   <target name="draft" description="Compile using GWT's draft mode">
+      <antcall target="generate-i18n"/>
+      <antcall target="gwtc">
+         <param name="gwt.main.module" value="org.rstudio.studio.RStudioDraft"/>
+         <param name="gwt.extra.args" value="${gwt.extra.args} -draftCompile -Xnamespace NONE -style PRETTY" />
+      </antcall>
+   </target>
+
+   <target name="desktop" description="Run desktop development mode">
+      <antcall target="generate-i18n"/>
+      <antcall target="codeserver">
+         <param name="gwt.main.module" value="org.rstudio.studio.RStudioDesktopSuperDevMode"/>
+         <param name="panmirror.target" value="ide-dev"/>
+         <param name="panmirror.minify" value="false"/>
+      </antcall>
+   </target>
+
+   <target name="devmode" description="Run server development mode">
+      <antcall target="generate-i18n"/>
+      <antcall target="codeserver">
+         <param name="gwt.main.module" value="org.rstudio.studio.RStudioSuperDevMode"/>
+         <param name="panmirror.target" value="ide-dev"/>
+         <param name="panmirror.minify" value="false"/>
+      </antcall>
+   </target>
+
+   <target name="devmode-panmirror" description="Run server development mode">
+      <antcall target="codeserver">
+         <param name="gwt.main.module" value="org.rstudio.studio.RStudioSuperDevMode"/>
+         <param name="panmirror.target" value="ide-dev-watch"/>
+         <param name="panmirror.minify" value="false"/>
+      </antcall>
+   </target>
+
+   <target name="codeserver" depends="acesupport,acesupport-watch,javac" description="Run GWT devmode code server">
+      <antcall target="panmirror">
+         <param name="panmirror.target" value="${panmirror.target}"/>
+      </antcall>
+      <java failonerror="true" fork="true" classname="com.google.gwt.dev.DevMode">
+         <classpath>
+            <pathelement location="${src.dir}"/>
+            <path refid="project.class.path"/>
+         </classpath>
+         <jvmarg value="-Xmx2048M"/>
+         <arg value="-sourceLevel"/>
+         <arg value="${javac.version}"/>
+         <arg value="-style"/>
+         <arg value="PRETTY"/>
+         <arg value="-XmethodNameDisplayMode"/>
+         <arg value="ABBREVIATED"/>
+         <arg value="-war"/>
+         <arg value="${www.dir}"/>
+         <arg value="-noserver"/>
+         <arg value="-startupUrl"/>
+         <arg value="http://localhost:8787"/>
+         <arg line="-bindAddress ${bind.address}"/>
+         <arg value="-generateJsInteropExports"/>
+         <arg value="${gwt.main.module}"/>
+      </java>
+   </target>
+
+   <!-- configure props for i18n tasks -->
+   <condition property="python.bin.detect" value="${tools.dir}/i18n-helpers/VENV/Scripts/python.exe">
+     <os family="windows" />
+   </condition>
+   <condition property="python.bin.detect" value="${tools.dir}/i18n-helpers/VENV/bin/python">
+     <not>
+        <os family="windows" />
+     </not>
+   </condition>
+   <property name="python.bin" location="${python.bin.detect}"/> <!-- location of i18n script -->
+   <property name="commands.dir" value="${src.dir}/org/rstudio/studio/client/workbench/commands"/> <!-- location of Commands.cmd.xml directory -->
+   <property name="python-executable-full-path" location="${tools.dir}/i18n-helpers/commands.cmd.xml/commands_xml_to_i18n.py"/> <!-- location of i18n script -->
+   <property name="commands-xml-full-path" location="${commands.dir}/Commands.cmd.xml"/> <!-- location of Commands & Menus definition file -->
+   <property name="command-constants-full-path" location="${commands.dir}/CmdConstants.java"/> <!-- location of CmdConstants.java -->
+   <property name="command-prop-full-path" location="${commands.dir}/CmdConstants_en.properties"/> <!-- location of CmdConstants en properties file -->
+   <property name="menu-constants-full-path" location="${commands.dir}/MenuConstants.java"/> <!-- location of MenuConstants.java -->
+   <property name="menu-prop-full-path" location="${commands.dir}/MenuConstants_en.properties"/> <!-- location of MenuConstants en properties file -->
+
+   <!-- verify if Commands.cmd.xml has changed -->
+   <target name="i18n-checksum">
+      <checksum file="${commands-xml-full-path}" verifyproperty="isMD5ok"/>
+      <echo message="Commands.cmd.xml i18n checksum matches: ${isMD5ok}"/>
+   </target>
+
+   <!-- determine what type of i18n generation is required (if any) -->
+   <target name="i18n-windows-check" depends="i18n-checksum">
+      <condition property="generate-i18n-windows">
+         <and>
+            <os family="windows"/>
+            <isfalse value="${isMD5ok}"/>
+         </and>
+      </condition>
+   </target>
+   <target name="i18n-unix-check" depends="i18n-checksum">
+      <condition property="generate-i18n-unix">
+         <and>
+            <os family="unix"/>
+            <isfalse value="${isMD5ok}"/>
+         </and>
+      </condition>
+   </target>
+
+   <!-- execute i18n tasks -->
+   <target name="i18n-windows" depends="i18n-windows-check" if="generate-i18n-windows">
+      <!-- generate Commands interface -->
+      <exec executable="cmd" failifexecutionfails="true" failonerror="true">
+         <arg value="/c"/>
+         <arg line="${python.bin} ${python-executable-full-path} &quot;${commands-xml-full-path}&quot; cmd constant &quot;${command-constants-full-path}&quot; --package &quot;package org.rstudio.studio.client.workbench.commands;&quot;"/>
+      </exec>
+      <!-- generate Commands english property file -->
+      <exec executable="cmd" failifexecutionfails="true" failonerror="true">
+         <arg value="/c"/>
+         <arg line="${python.bin} ${python-executable-full-path} &quot;${commands-xml-full-path}&quot; cmd properties &quot;${command-prop-full-path}&quot;"/>
+      </exec>
+      <!-- generate Menu interface -->
+      <exec executable="cmd" failifexecutionfails="true" failonerror="true">
+         <arg value="/c"/>
+         <arg line="${python.bin} ${python-executable-full-path} &quot;${commands-xml-full-path}&quot; menu constant &quot;${menu-constants-full-path}&quot; --package &quot;package org.rstudio.studio.client.workbench.commands;&quot;"/>
+      </exec>
+      <!-- generate Menu english prop file -->
+      <exec executable="cmd" failifexecutionfails="true" failonerror="true">
+         <arg value="/c"/>
+         <arg line="${python.bin} ${python-executable-full-path} &quot;${commands-xml-full-path}&quot; menu properties &quot;${menu-prop-full-path}&quot;"/>
+      </exec>
+      <!-- regenerate checksum -->
+      <checksum file="${commands-xml-full-path}" forceOverwrite="yes"/>
+   </target>
+   <target name="i18n-unix" depends="i18n-unix-check" if="generate-i18n-unix">
+
+      <!-- generate Commands interface -->
+      <exec executable="/bin/sh" failifexecutionfails="true" failonerror="true">
+         <arg line="-c '${python.bin} ${python-executable-full-path} &quot;${commands-xml-full-path}&quot; cmd constant &quot;${command-constants-full-path}&quot; --package &quot;package org.rstudio.studio.client.workbench.commands;&quot;'"/>
+      </exec>
+      <!-- generate Commands english property file -->
+      <exec executable="/bin/sh" failifexecutionfails="true" failonerror="true">
+         <arg line="-c '${python.bin} ${python-executable-full-path} &quot;${commands-xml-full-path}&quot; cmd properties &quot;${command-prop-full-path}&quot;'"/>
+      </exec>
+      <!-- generate Menu interface -->
+      <exec executable="/bin/sh" failifexecutionfails="true" failonerror="true">
+         <arg line="-c '${python.bin} ${python-executable-full-path} &quot;${commands-xml-full-path}&quot; menu constant &quot;${menu-constants-full-path}&quot; --package &quot;package org.rstudio.studio.client.workbench.commands;&quot;'"/>
+      </exec>
+      <!-- generate Menu english prop file -->
+      <exec executable="/bin/sh" failifexecutionfails="true" failonerror="true">
+         <arg line="-c '${python.bin} ${python-executable-full-path} &quot;${commands-xml-full-path}&quot; menu properties &quot;${menu-prop-full-path}&quot;'"/>
+      </exec>
+      <!-- regenerate checksum -->
+      <checksum file="${commands-xml-full-path}" forceOverwrite="yes"/>
+   </target>
+
+   <target name="generate-i18n" depends="i18n-unix, i18n-windows" description="Generates i18n for Command and Menu constants" />
+
+   <target name="build" depends="generate-i18n, gwtc" description="Build this project" />
+
+   <target name="clean" description="Cleans this project">
+      <delete dir="${build.dir}" failonerror="false" />
+      <delete dir="gwt-unitCache" failonerror="false" />
+      <delete dir="${www.dir}/rstudio" failonerror="false" />
+      <delete file="${ace.bin}/acesupport.js" failonerror="false" />
+      <delete dir="${panmirror.build.dir}" failonerror="false"/>
+      <delete dir="${panmirror.dir}/dist-rstudio" failonerror="false"/>
+      <delete dir="${panmirror.dir}/node_modules" failonerror="false"/>
+      <delete dir="gen" failonerror="false" />
+      <delete dir="${extras.dir}" failonerror="false" />
+   </target>
+
+   <target name="build-unittests" depends="acesupport,javac" description="Builds JUnit unit tests">
+      <java-compile srcdir="test" includes="org/rstudio/**/client/**">
+         <classpath refid="unittest.class.path"/>
+         <classpath refid="project.class.path"/>
+      </java-compile>
+   </target>
+
+   <target name="unittest" description="Runs JUnit unit tests" depends="build-unittests">
+      <java failonerror="true" fork="true" classname="org.junit.runner.JUnitCore">
+         <classpath>
+            <pathelement location="${test.dir}"/>
+            <pathelement location="${src.dir}"/>
+         </classpath>
+         <classpath refid="project.class.path"/>
+         <classpath refid="unittest.class.path"/>
+         <jvmarg value="-Dgwt.args=-sourceLevel ${javac.version}"/>
+         <arg value="org.rstudio.studio.client.RStudioUnitTestSuite"/>
+     </java>
+   </target>
+
+   <!-- Headless runner for the standalone HTML test pages under test/.
+        Exercises the acesupport autoindent / highlight harnesses in a real
+        browser (Playwright's bundled chromium), catching regressions in
+        acesupport. Pulls in playwright via `npm ci`, then shells out to
+        runner.mjs which serves src/gwt/ over a local HTTP server and
+        aggregates per-page pass/fail counts. -->
+
+   <property name="testpage.runner.dir" value="test/runner"/>
+
+   <set-if-exists property="npm.bin" value="${node.dir}/bin/npm"/>
+   <set-if-exists property="npm.bin" value="${node.dir}/npm.cmd"/>
+   <set-if-unset  property="npm.bin" value="npm"/>
+
+   <set-if-exists property="node.bin" value="${node.dir}/bin/node"/>
+   <set-if-exists property="node.bin" value="${node.dir}/node.exe"/>
+   <set-if-unset  property="node.bin" value="node"/>
+
+   <target name="testpage" depends="acesupport"
+           description="Runs the standalone HTML test pages under test/ in headless chromium">
+      <retry retrycount="3">
+         <exec executable="${npm.bin}" dir="${testpage.runner.dir}" resolveexecutable="true" failonerror="true">
+            <arg value="ci"/>
+         </exec>
+      </retry>
+      <exec executable="${node.bin}" dir="${testpage.runner.dir}" resolveexecutable="true" failonerror="true">
+         <arg value="runner.mjs"/>
+      </exec>
+   </target>
+
+   <target name="test" depends="unittest,testpage">
+   </target>
+
+</project>

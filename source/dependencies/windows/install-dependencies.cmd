@@ -1,0 +1,279 @@
+
+@echo off
+setlocal EnableDelayedExpansion
+
+:: Resolve paths relative to this script (not the current directory), so the
+:: tracked install scripts can be run from anywhere.
+for %%F in ("%~dp0..\tools\rstudio-tools.cmd") do (
+  set "RSTUDIO_TOOLS=%%~fF"
+)
+
+echo -- Using RStudio tools: %RSTUDIO_TOOLS%
+call %RSTUDIO_TOOLS%
+
+:: The source-tree directories holding the (tracked) install scripts. The
+:: dependencies themselves are downloaded and installed into
+:: RSTUDIO_TOOLS_ROOT (set by rstudio-tools.cmd if not already defined in
+:: the environment), so that downloaded artifacts live outside the source
+:: tree. Set RSTUDIO_TOOLS_ROOT to the root of an RStudio checkout to
+:: reproduce the legacy in-tree layout.
+set "WINDOWS_SCRIPTS_DIR=%~dp0"
+for %%F in ("%~dp0..\common") do (
+  set "COMMON_SCRIPTS_DIR=%%~fF"
+)
+
+set "COMMON_INSTALL_DIR=%RSTUDIO_TOOLS_ROOT%\dependencies\common"
+set "WINDOWS_INSTALL_DIR=%RSTUDIO_TOOLS_ROOT%\dependencies\windows"
+
+if not exist "%COMMON_INSTALL_DIR%" mkdir "%COMMON_INSTALL_DIR%"
+if not exist "%WINDOWS_INSTALL_DIR%" mkdir "%WINDOWS_INSTALL_DIR%"
+
+echo -- Installing dependencies to: %RSTUDIO_TOOLS_ROOT%\dependencies
+
+set PATH=%WINDOWS_SCRIPTS_DIR%tools;%PATH%
+
+set BOOST_VERSION=1.91.0
+set GNUGREP_VERSION=3.0
+set GWT_VERSION=2.12.2-apple-blossom
+set LIBCLANG_VERSION=13.0.1
+set MATHJAX_VERSION=2.7.9
+REM The MSVC toolset used for Boost prebuilts. Can be set in the environment
+REM to select a different set of prebuilts (e.g. 145 for Visual Studio 2026).
+if not defined MSVC_TOOLSET_VERSION set MSVC_TOOLSET_VERSION=143
+set NSPROCESS_VERSION=1.6
+set OPENSSL_VERSION=3.1.4
+set PANDOC_VERSION=3.2
+set QUARTO_VERSION=1.9.38
+set COPILOT_VERSION=1.509.1
+set SUMATRA_VERSION=3.1.2
+set WINUTILS_VERSION=1.0
+
+set CLEAN=0
+set QUIET=0
+for %%A in (%*) do (
+
+  if /I "%%A" == "clean" (
+    set CLEAN=1
+  )
+
+  if /I "%%A" == "quiet" (
+    set QUIET=1
+  )
+
+)
+
+REM Check for required tools on the PATH.
+for %%X in (R.exe 7z.exe cmake.exe curl.exe) do (
+  where /q %%X
+  if ERRORLEVEL 1 (
+    echo ^^!^^! ERROR: %%X is not available on the PATH; cannot proceed.
+    exit /b
+  )
+)
+
+set QUARTO_URL=https://github.com/quarto-dev/quarto-cli/releases/download/v%QUARTO_VERSION%/quarto-%QUARTO_VERSION%-win.zip
+set QUARTO_FOLDER=quarto
+set QUARTO_OUTPUT=quarto
+
+
+set COPILOT_URL=copilot-language-server/%COPILOT_VERSION%/copilot-language-server-js-%COPILOT_VERSION%.zip
+set COPILOT_FOLDER=copilot-language-server-js
+set COPILOT_OUTPUT=copilot-language-server-js
+
+
+set GNUDIFF_URL=gnudiff.zip
+set GNUDIFF_FOLDER=gnudiff
+set GNUDIFF_OUTPUT=gnudiff
+
+
+set GNUGREP_URL=gnugrep-%GNUGREP_VERSION%.zip
+set GNUGREP_FOLDER=gnugrep\%GNUGREP_VERSION%
+set GNUGREP_OUTPUT=gnugrep\%GNUGREP_VERSION%
+
+
+set GWT_URL=gwt/gwt-%GWT_VERSION%.tar.gz
+set GWT_FOLDER=gwtproject\%GWT_VERSION%
+set GWT_OUTPUT=gwtproject
+
+
+set SUMATRA_URL=sumatrapdf/SumatraPDF-%SUMATRA_VERSION%-64.zip
+set SUMATRA_FOLDER=sumatra\%SUMATRA_VERSION%
+set SUMATRA_OUTPUT=sumatra\%SUMATRA_VERSION%
+
+
+set WINUTILS_URL=winutils-%WINUTILS_VERSION%.zip
+set WINUTILS_FOLDER=winutils\%WINUTILS_VERSION%
+set WINUTILS_OUTPUT=winutils\%WINUTILS_VERSION%
+
+
+set OPENSSL_URL=openssl-%OPENSSL_VERSION%.zip
+set OPENSSL_FOLDER=openssl-%OPENSSL_VERSION%
+set OPENSSL_OUTPUT=
+
+
+set BOOST_URL=Boost/boost-%BOOST_VERSION%-win-msvc%MSVC_TOOLSET_VERSION%.zip
+set BOOST_FOLDER=boost-%BOOST_VERSION%-win-msvc%MSVC_TOOLSET_VERSION%
+set BOOST_OUTPUT=
+
+
+set RESHACKER_URL=resource-hacker/resource_hacker.zip
+set RESHACKER_FOLDER=resource-hacker
+set RESHACKER_OUTPUT=resource-hacker
+
+
+set NSPROCESS_URL=nsprocess/NsProcess.zip
+set NSPROCESS_FOLDER=nsprocess\%NSPROCESS_VERSION%
+set NSPROCESS_OUTPUT=nsprocess\%NSPROCESS_VERSION%
+
+
+set DICTIONARIES_URL=dictionaries/core-dictionaries.zip
+set DICTIONARIES_FOLDER=dictionaries
+set DICTIONARIES_OUTPUT=dictionaries
+
+
+set MATHJAX_URL=mathjax-%MATHJAX_VERSION%.zip
+set MATHJAX_FOLDER=mathjax-27
+set MATHJAX_OUTPUT=
+
+
+set PANDOC_URL=pandoc/%PANDOC_VERSION%/pandoc-%PANDOC_VERSION%-windows-x86_64.zip
+set PANDOC_FOLDER=pandoc
+set PANDOC_OUTPUT=pandoc
+
+
+set LIBCLANG_URL=libclang-windows-%LIBCLANG_VERSION%.zip
+set LIBCLANG_FOLDER=libclang\%LIBCLANG_VERSION%
+set LIBCLANG_OUTPUT=
+
+
+set NODEBUILD_VERSION=%RSTUDIO_NODE_VERSION%
+set NODEBUILD_LABEL=node (%NODEBUILD_VERSION%; build)
+set NODEBUILD_FILE=node-v%NODEBUILD_VERSION%-win-x64
+set NODEBUILD_URL=%RSTUDIO_BUILDTOOLS%/node/v%NODEBUILD_VERSION%/%NODEBUILD_FILE%.zip
+set NODEBUILD_FOLDER=node\%NODEBUILD_VERSION%
+set NODEBUILD_OUTPUT=node
+
+set NODEBUNDLE_VERSION=%RSTUDIO_INSTALLED_NODE_VERSION%
+set NODEBUNDLE_LABEL=node (%NODEBUNDLE_VERSION%; bundled)
+set NODEBUNDLE_FILE=node-v%NODEBUNDLE_VERSION%-win-x64
+set NODEBUNDLE_URL=%RSTUDIO_BUILDTOOLS%/node/v%NODEBUNDLE_VERSION%/%NODEBUNDLE_FILE%.zip
+set NODEBUNDLE_FOLDER=node\%NODEBUNDLE_VERSION%-installed
+set NODEBUNDLE_OUTPUT=node
+
+:: Install 'common' dependencies first.
+cd /d "%COMMON_INSTALL_DIR%"
+
+%RUN% install GWT
+%RUN% install DICTIONARIES
+%RUN% install MATHJAX
+%RUN% install LIBCLANG
+
+REM Determine if we have the correct version of quarto.exe already installed
+if exist quarto\bin\quarto.exe (
+  for /f "usebackq" %%v in (`quarto\bin\quarto.exe --version`) do (
+    if not "%%v" == "%QUARTO_VERSION%" (
+      echo -- Quarto version mismatch: found %%v, expected %QUARTO_VERSION%
+      rmdir /s /q quarto
+      if exist quarto (
+        echo ^^!^^! ERROR: Could not remove old quarto directory. Close any process holding files in it and retry.
+        exit /b 1
+      )
+    )
+  )
+)
+REM If a quarto directory exists but quarto.exe is missing, a previous install was incomplete; remove it so the install can retry.
+if exist quarto if not exist quarto\bin\quarto.exe (
+  echo -- Removing incomplete quarto directory from a prior failed install
+  rmdir /s /q quarto
+  if exist quarto (
+    echo ^^!^^! ERROR: Could not remove incomplete quarto directory. Close any process holding files in it and retry.
+    exit /b 1
+  )
+)
+%RUN% install QUARTO
+if not exist quarto\bin\quarto.exe (
+  echo ^^!^^! ERROR: Quarto install failed: quarto\bin\quarto.exe not found.
+  exit /b 1
+)
+
+REM Always remove any existing copilot-language-server installations to ensure latest version
+if exist copilot-language-server (
+  echo -- Removing old copilot-language-server directory
+  rmdir /s /q copilot-language-server
+)
+if exist copilot-language-server-js (
+  echo -- Removing existing copilot-language-server-js directory
+  rmdir /s /q copilot-language-server-js
+)
+%RUN% install COPILOT
+
+%RUN% install PANDOC
+if exist pandoc\pandoc-%PANDOC_VERSION% (
+  rmdir /s /q pandoc\%PANDOC_VERSION% 2>NUL
+  %RUN% move pandoc\pandoc-%PANDOC_VERSION% pandoc\%PANDOC_VERSION%
+  if ERRORLEVEL 1 (
+    echo ^^!^^! ERROR: Could not move pandoc installation to pandoc\%PANDOC_VERSION%.
+    exit /b
+  )
+)
+
+%RUN% install NODEBUILD
+if exist node\%NODEBUILD_FILE% (
+  rmdir /s /q node\%NODEBUILD_VERSION% 2>NUL
+  %RUN% move node\%NODEBUILD_FILE% node\%NODEBUILD_VERSION%
+  if ERRORLEVEL 1 (
+    echo ^^!^^! ERROR: Could not move node installation to node\%NODEBUILD_VERSION%.
+    exit /b
+  )
+)
+
+%RUN% install NODEBUNDLE
+if exist node\%NODEBUNDLE_FILE% (
+  rmdir /s /q node\%NODEBUNDLE_VERSION%-installed 2>NUL
+  mkdir node\%NODEBUNDLE_VERSION%-installed 2>NUL
+  if ERRORLEVEL 1 (
+    echo ^^!^^! ERROR: Could not create directory node\%NODEBUNDLE_VERSION%-installed.
+    exit /b
+  )
+  move node\%NODEBUNDLE_FILE%\node.exe node\%NODEBUNDLE_VERSION%-installed\node.exe
+  if ERRORLEVEL 1 (
+    echo ^^!^^! ERROR: Could not move node installation to node\%NODEBUNDLE_VERSION%-installed.
+    exit /b
+  )
+  rmdir /s /q node\%NODEBUNDLE_FILE% 2>NUL
+)
+
+pushd node\%NODEBUILD_VERSION%
+if not exist yarn.cmd (
+  echo -- Installing yarn
+  call npm install --global yarn
+)
+popd
+
+echo -- Installing packages
+call "%COMMON_SCRIPTS_DIR%\install-packages.cmd"
+
+:: Install the rest of our dependencies into the 'windows' folder.
+cd /d "%WINDOWS_INSTALL_DIR%"
+
+%RUN% install GNUDIFF
+%RUN% install GNUGREP
+%RUN% install SUMATRA
+%RUN% install WINUTILS
+%RUN% install OPENSSL
+%RUN% install BOOST
+%RUN% install RESHACKER
+%RUN% install NSPROCESS
+
+
+echo -- Installing panmirror (Visual Editor)
+pushd "%WINDOWS_SCRIPTS_DIR%install-panmirror"
+call clone-panmirror-repo.cmd
+popd
+
+echo -- Installing SOCI
+call "%WINDOWS_SCRIPTS_DIR%install-soci.cmd"
+
+:: The i18n helper scripts live relative to the source tree; run from there.
+cd /d "%WINDOWS_SCRIPTS_DIR%"
+%RUN% install-i18n-dependencies

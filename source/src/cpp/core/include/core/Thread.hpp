@@ -1,0 +1,476 @@
+/*
+ * Thread.hpp
+ *
+ * Copyright (C) 2022 by Posit Software, PBC
+ *
+ * Unless you have received this program directly from Posit Software pursuant
+ * to the terms of a commercial license agreement with Posit Software, then
+ * this program is licensed to you under the terms of version 3 of the
+ * GNU Affero General Public License. This program is distributed WITHOUT
+ * ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+ * AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+ *
+ */
+
+#ifndef CORE_THREAD_HPP
+#define CORE_THREAD_HPP
+
+#include <map>
+#include <queue>
+#include <set>
+#include <thread>
+
+#include <boost/utility.hpp>
+#include <boost/function.hpp>
+
+#include <shared_core/Error.hpp>
+
+#include <core/BoostErrors.hpp>
+#include <core/BoostThread.hpp>
+#include <core/system/System.hpp>
+
+#define LOCK_MUTEX(m)                                                          \
+   try                                                                         \
+   {                                                                           \
+      boost::lock_guard<boost::mutex> lock(m);
+
+#define RECURSIVE_LOCK_MUTEX(m)                                                \
+   try                                                                         \
+   {                                                                           \
+      boost::lock_guard<boost::recursive_mutex> lock(m);
+
+#define UNIQUE_LOCK_MUTEX(m, lockvar)                                          \
+   try                                                                         \
+   {                                                                           \
+      boost::unique_lock<boost::mutex> lockvar(m);                             \
+
+#define END_LOCK_MUTEX                                                         \
+   }                                                                           \
+   catch (const boost::thread_resource_error& e)                               \
+   {                                                                           \
+      core::Error threadError(boost::thread_error::ec_from_exception(e),       \
+                              ERROR_LOCATION);                                 \
+      LOG_ERROR(threadError);                                                  \
+   }                                                                           \
+   CATCH_UNEXPECTED_EXCEPTION
+
+#define ASSERT_MAIN_THREAD(__REASON__)                                         \
+   (::rstudio::core::thread::assertMainThread(                                 \
+      { __REASON__ },                                                          \
+      BOOST_CURRENT_FUNCTION,                                                  \
+      ERROR_LOCATION))
+
+
+namespace rstudio {
+namespace core {
+namespace thread {
+
+template <typename T>
+class ThreadsafeValue : boost::noncopyable
+{
+public:
+   explicit ThreadsafeValue(const T& value = T()) : value_(value) {}
+   virtual ~ThreadsafeValue() {}
+
+   T get()
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         return value_;
+      }
+      END_LOCK_MUTEX
+
+      // keep compiler happy
+      return T();
+   }
+
+   void set(const T& value)
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         value_ = value;
+      }
+      END_LOCK_MUTEX
+   }
+
+private:
+   boost::mutex mutex_;
+   T value_;
+};
+
+template <typename K, typename V>
+class ThreadsafeMap : boost::noncopyable
+{
+public:
+   ThreadsafeMap() {}
+   virtual ~ThreadsafeMap() {}
+
+   bool contains(const K& key)
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         return map_.find(key) != map_.end();
+      }
+      END_LOCK_MUTEX
+
+      // keep compiler happy
+      return false;
+   }
+
+   V get(const K& key, const V& defaultValue = V())
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         typename std::map<K,V>::const_iterator it = map_.find(key);
+         if (it != map_.end())
+            return it->second;
+         else
+            return defaultValue;
+      }
+      END_LOCK_MUTEX
+
+      // keep compiler happy
+      return defaultValue;
+   }
+
+   V collect(const K& key)
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         typename std::map<K,V>::const_iterator it = map_.find(key);
+         if (it != map_.end())
+         {
+            V val = it->second;
+            map_.erase(key);
+            return val;
+         }
+      }
+      END_LOCK_MUTEX
+
+      return V();
+   }
+
+   void set(const K& key, const V& val)
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         map_[key] = val;
+      }
+      END_LOCK_MUTEX
+   }
+
+   void remove(const K& key)
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         map_.erase(key);
+      }
+      END_LOCK_MUTEX
+   }
+
+   void clear()
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         map_.clear();
+      }
+      END_LOCK_MUTEX
+   }
+
+private:
+   boost::mutex mutex_;
+   std::map<K,V> map_;
+};
+
+
+template <typename T>
+class ThreadsafeQueue : boost::noncopyable
+{
+public:
+   explicit ThreadsafeQueue(bool freeSyncObjects = false)
+      :  pMutex_(new boost::mutex()),
+         pWaitCondition_(new boost::condition()),
+         freeSyncObjects_(freeSyncObjects)
+   {
+   }
+
+   virtual ~ThreadsafeQueue()
+   {
+      try
+      {
+         if (freeSyncObjects_)
+         {
+            delete pMutex_;
+            delete pWaitCondition_;
+         }
+      }
+      catch(...)
+      {
+      }
+   }
+
+   // COPYING: boost::noncopyable
+
+public:
+
+   void enque(const T& val)
+   {
+      LOCK_MUTEX(*pMutex_)
+      {
+         // enque
+         queue_.push(val);
+      }
+      END_LOCK_MUTEX
+
+      pWaitCondition_->notify_all();
+   }
+
+   bool deque(T* pVal)
+   {
+      LOCK_MUTEX(*pMutex_)
+      {
+         if (!queue_.empty())
+         {
+            // remove it
+            *pVal = queue_.front();
+            queue_.pop();
+
+            // return true
+            return true;
+         }
+         else
+         {
+            return false;
+         }
+      }
+      END_LOCK_MUTEX
+
+      // keep compiler happy
+      return false;
+   }
+
+   bool isEmpty()
+   {
+      LOCK_MUTEX(*pMutex_)
+      {
+         return queue_.empty();
+      }
+      END_LOCK_MUTEX
+
+      // keep compiler happy
+      return true;
+   }
+
+   bool deque(T* pVal, const boost::posix_time::time_duration& waitDuration)
+   {
+      boost::unique_lock<boost::mutex> lock(*pMutex_);
+
+      if (!queue_.empty())
+      {
+         *pVal = queue_.front();
+         queue_.pop();
+
+         return true;
+      }
+      else if (waitDuration.is_not_a_date_time())
+      {
+         try
+         {
+            while (queue_.empty()) 
+               pWaitCondition_->wait(lock);
+         }
+         catch(const boost::thread_resource_error& e)
+         {
+            Error waitError(boost::thread_error::ec_from_exception(e), ERROR_LOCATION);
+            LOG_ERROR(waitError);
+            return false;
+         }
+
+         // We are locked when wait returns
+         *pVal = queue_.front();
+         queue_.pop();
+         
+         return true;
+      }
+      else
+      {
+         boost::system_time timeoutTime = boost::get_system_time() + waitDuration;
+
+         try
+         {
+            // Handle spurious wakeups by looping
+            while (queue_.empty())
+            {
+               boost::system_time now = boost::get_system_time();
+               if (now >= timeoutTime)
+               {
+                  return false; // Already timed out
+               }
+
+               if( !pWaitCondition_->timed_wait(lock, timeoutTime))
+               {
+                  return false; // Timed out
+               }
+            }
+         }
+         catch(const boost::thread_resource_error& e)
+         {
+            Error waitError(boost::thread_error::ec_from_exception(e), ERROR_LOCATION);
+            LOG_ERROR(waitError);
+            return false;
+         }
+
+         // We are locked when wait returns and we are notified
+         *pVal = queue_.front();
+         queue_.pop();
+
+         return true;
+      }
+   }
+
+   // TODO - When this returns the mutex is not locked and the condition being waited on may have changed
+   bool wait(const boost::posix_time::time_duration& waitDuration =
+                boost::posix_time::time_duration(boost::posix_time::not_a_date_time))
+   {
+      using namespace boost;
+      try
+      {
+         unique_lock<mutex> lock(*pMutex_);
+         if (waitDuration.is_not_a_date_time())
+         {
+            pWaitCondition_->wait(lock);
+            return true;
+         }
+         else
+         {
+            system_time timeoutTime = get_system_time() + waitDuration;
+            return pWaitCondition_->timed_wait(lock, timeoutTime);
+         }
+      }
+      catch(const thread_resource_error& e)
+      {
+         Error waitError(boost::thread_error::ec_from_exception(e), ERROR_LOCATION);
+         LOG_ERROR(waitError);
+         return false;
+      }
+   }
+
+private:
+   // synchronization objects. heap based so that we can control whether
+   // they are destroyed or not (boost has been known to crash if a mutex
+   // is being destroyed while it is being waited on so sometimes it is
+   // better to simply never delete these objects
+   boost::mutex* pMutex_;
+   boost::condition* pWaitCondition_;
+
+   // instance data
+   const bool freeSyncObjects_;
+   std::queue<T> queue_;
+};
+
+template <typename T>
+class ThreadsafeSet
+{
+public:
+   bool contains(const T& value) const
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         return set_.find(value) != set_.end();
+      }
+      END_LOCK_MUTEX
+
+      // This will only be hit if we had a problem acquiring the lock, which likely means we have bigger problems.
+      return false;
+   }
+
+   void insert(const T& value)
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         set_.insert(value);
+      }
+      END_LOCK_MUTEX
+   }
+
+   void insert(T&& value)
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         set_.insert(value);
+      }
+      END_LOCK_MUTEX
+   }
+
+   void remove(const T& value)
+   {
+      LOCK_MUTEX(mutex_)
+      {
+         auto itr = set_.find(value);
+         if (itr != set_.end())
+            set_.erase(value);
+      }
+      END_LOCK_MUTEX
+   }
+
+private:
+   std::set<T> set_;
+   mutable boost::mutex mutex_;
+};
+
+template <typename F>
+boost::thread run(F&& f)
+{
+   try
+   {
+      system::SignalBlocker blocker;
+      Error error = blocker.blockAll();
+      if (error)
+         LOG_ERROR(error);
+
+      return boost::thread(std::forward<F>(f));
+   }
+   CATCH_UNEXPECTED_EXCEPTION;
+
+   return {};
+}
+
+void safeLaunchThread(boost::function<void()> threadMain,
+                      boost::thread* pThread = nullptr);
+
+// Best-effort join for a background worker on the process-exit path. Waits up
+// to `timeout` for `thread` to finish; if it doesn't, logs a warning naming the
+// thread and detaches it (so ~boost::thread does not std::terminate() on a
+// still-joinable handle) and returns so shutdown can proceed instead of hanging
+// indefinitely. A non-joinable thread (never started or already joined) is a
+// no-op. Returns true if the thread was joined, false if it timed out and was
+// detached. Never throws, so it is safe to call from a destructor.
+//
+// `interrupt` is deliberately required so every caller decides how its thread
+// is woken: pass true for a thread whose run loop polls boost interruption
+// points (this calls boost::thread::interrupt() before joining); pass false for
+// a thread woken another way (for example an io_context worker, which is not an
+// interruption point and must be released via io_context::stop() by the caller
+// before calling this).
+bool joinOrAbandonThread(
+   boost::thread& thread,
+   const std::string& name,
+   bool interrupt,
+   const boost::posix_time::time_duration& timeout = boost::posix_time::seconds(3));
+
+void initializeMainThreadId(boost::thread::id id);
+
+bool isMainThread();
+
+bool assertMainThread(
+      const std::string& reason,
+      const std::string& functionName,
+      const core::ErrorLocation& errorLocation);
+
+} // namespace thread
+} // namespace core
+} // namespace rstudio
+
+#endif // CORE_THREAD_HPP
+

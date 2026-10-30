@@ -1,0 +1,317 @@
+/*
+ * DirectoryContentsWidget.java
+ *
+ * Copyright (C) 2022 by Posit Software, PBC
+ *
+ * Unless you have received this program directly from Posit Software pursuant
+ * to the terms of a commercial license agreement with Posit Software, then
+ * this program is licensed to you under the terms of version 3 of the
+ * GNU Affero General Public License. This program is distributed WITHOUT
+ * ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+ * AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+ *
+ */
+package org.rstudio.core.client.files.filedialog;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.rstudio.core.client.CoreClientConstants;
+import org.rstudio.core.client.Point;
+import org.rstudio.core.client.StringUtil;
+import org.rstudio.core.client.events.HasSelectionCommitHandlers;
+import org.rstudio.core.client.events.SelectionCommitEvent;
+import org.rstudio.core.client.files.FileSystemContext;
+import org.rstudio.core.client.files.FileSystemItem;
+import org.rstudio.core.client.widget.CanFocus;
+import org.rstudio.core.client.widget.RowTable;
+import org.rstudio.core.client.widget.SimplePanelWithProgress;
+import org.rstudio.studio.client.RStudioGinjector;
+import org.rstudio.studio.client.common.filetypes.FileIcon;
+import org.rstudio.studio.client.common.filetypes.FileTypeRegistry;
+
+import com.google.gwt.aria.client.Roles;
+import com.google.gwt.core.client.GWT;
+import com.google.gwt.dom.client.DivElement;
+import com.google.gwt.dom.client.Document;
+import com.google.gwt.dom.client.TableCellElement;
+import com.google.gwt.dom.client.TableRowElement;
+import com.google.gwt.event.dom.client.KeyCodes;
+import com.google.gwt.event.dom.client.KeyDownEvent;
+import com.google.gwt.event.dom.client.KeyDownHandler;
+import com.google.gwt.event.logical.shared.HasSelectionHandlers;
+import com.google.gwt.event.logical.shared.SelectionEvent;
+import com.google.gwt.event.logical.shared.SelectionHandler;
+import com.google.gwt.event.shared.HandlerRegistration;
+import com.google.gwt.user.client.Timer;
+import com.google.gwt.user.client.ui.Composite;
+
+public class DirectoryContentsWidget extends Composite
+   implements HasSelectionHandlers<FileSystemItem>,
+              HasSelectionCommitHandlers<FileSystemItem>,
+              CanFocus
+{
+   public DirectoryContentsWidget(FileSystemContext context)
+   {
+      data_ = new ArrayList<>();
+      table_ = new RowTable<FileSystemItem>(constants_.directoryContentsLabel())
+      {
+         private final FileTypeRegistry registry_ = RStudioGinjector.INSTANCE.getFileTypeRegistry();
+         
+         @Override
+         public double getRowHeight()
+         {
+            return 24;
+         }
+         
+         @Override
+         public int[] getColumnWidths()
+         {
+            return new int[] { 22, 222, 70, 150, 20 };
+         }
+         
+         @Override
+         public String getKey(FileSystemItem object)
+         {
+            return object.getName();
+         }
+         
+         @Override
+         public void drawRowImpl(FileSystemItem object, TableRowElement rowEl)
+         {
+            // Reuse some variable names
+            TableCellElement cellEl;
+            DivElement divEl;
+            
+            // Icon
+            cellEl = Document.get().createTDElement();
+            FileIcon icon = registry_.getIconForFile(object);
+            cellEl.appendChild(icon.getImage().getElement());
+            rowEl.appendChild(cellEl);
+            
+            // File name
+            cellEl = Document.get().createTDElement();
+            divEl = Document.get().createDivElement();
+            divEl.setInnerText(object.getName());
+            cellEl.appendChild(divEl);
+            rowEl.appendChild(cellEl);
+            
+            if (object.isDirectory())
+            {
+               cellEl.setAttribute("colspan", "4");
+            }
+            else
+            {
+               // File size
+               cellEl = Document.get().createTDElement();
+               divEl = Document.get().createDivElement();
+               divEl.setInnerText(StringUtil.formatFileSize(object.getLength()));
+               cellEl.appendChild(divEl);
+               rowEl.appendChild(cellEl);
+
+               // File date
+               cellEl = Document.get().createTDElement();
+               divEl = Document.get().createDivElement();
+               divEl.setInnerText(StringUtil.formatDate(object.getLastModified()));
+               cellEl.appendChild(divEl);
+               rowEl.appendChild(cellEl);
+
+               // Padding (for scrollbar)
+               cellEl = Document.get().createTDElement();
+               rowEl.appendChild(cellEl);
+            }
+         }
+
+      };
+      
+      // background color is set via RowTable.css
+      table_.setSize("500px", "300px");
+      
+      table_.addDomHandler(new KeyDownHandler()
+      {
+         @Override
+         public void onKeyDown(KeyDownEvent event)
+         {
+            if (event.getNativeKeyCode() == KeyCodes.KEY_BACKSPACE)
+            {
+               if (parentDirectory_ != null)
+               {
+                  event.stopPropagation();
+                  event.preventDefault();
+                  commitSelection(parentDirectory_);
+               }
+            }
+         }
+      }, KeyDownEvent.getType());
+      
+      table_.addSelectionHandler(new SelectionHandler<FileSystemItem>()
+      {
+         @Override
+         public void onSelection(SelectionEvent<FileSystemItem> event)
+         {
+            SelectionEvent.fire(DirectoryContentsWidget.this, event.getSelectedItem());
+         }
+      });
+      
+      table_.addSelectionCommitHandler(new SelectionCommitEvent.Handler<FileSystemItem>()
+      {
+         @Override
+         public void onSelectionCommit(SelectionCommitEvent<FileSystemItem> event)
+         {
+            commitSelection(event.getSelectedItem());
+         }
+      });
+      
+      progressPanel_ = new SimplePanelWithProgress();
+      progressPanel_.setHeight("300px");
+      progressPanel_.setWidget(null);
+      initWidget(progressPanel_);
+   }
+
+   private void commitSelection(FileSystemItem item)
+   {
+      if (StringUtil.equals(item.getName(), ".."))
+      {
+         item = parentDirectory_;
+      }
+      
+      SelectionCommitEvent.fire(DirectoryContentsWidget.this, item);
+   }
+
+   public void setSelectedRow(Integer row)
+   {
+      table_.selectRow(row);
+   }
+
+   public String getSelectedValue()
+   {
+      FileSystemItem item = getSelectedItem();
+      return item == null ? "" : item.getName();
+   }
+
+   public FileSystemItem getSelectedItem()
+   {
+      return table_.getSelectedItem();
+   }
+
+   public void showProgress(boolean show)
+   {
+      if (show)
+      {
+         // Disable interaction with stale contents while navigating.
+         table_.getElement().getStyle().setProperty("pointerEvents", "none");
+
+         // Delay switching to the progress panel. If content arrives
+         // before the timer fires, we skip the progress view entirely,
+         // avoiding a visual flash on fast navigations.
+         progressTimer_.schedule(PROGRESS_DELAY_MS);
+      }
+      else
+      {
+         progressTimer_.cancel();
+         table_.getElement().getStyle().clearProperty("pointerEvents");
+         table_.draw(data_);
+         progressPanel_.setWidget(table_);
+      }
+   }
+
+   public void clearContents()
+   {
+      Roles.getListboxRole().removeAriaActivedescendantProperty(table_.getElement());
+      table_.clear();
+      table_.scrollToTop();
+      table_.scrollToLeft();
+   }
+
+   public void setContents(FileSystemItem[] contents,
+                           FileSystemItem parentDirectory)
+   {
+      clearContents();
+
+      parentDirectory_ = parentDirectory;
+      if (parentDirectory != null)
+         addItem(FileSystemItem.createDir(".."));
+
+      for (FileSystemItem fsi : contents)
+         addItem(fsi);
+
+      showProgress(false);
+   }
+
+   private void addItem(FileSystemItem item)
+   {
+      data_.add(item);
+   }
+
+   public Point getScrollPosition()
+   {
+      return Point.create(
+            table_.getHorizontalScrollPosition(),
+            table_.getVerticalScrollPosition());
+   }
+
+   public void setScrollPosition(Point p)
+   {
+      table_.setVerticalScrollPosition(p.getY());
+      table_.setHorizontalScrollPosition(p.getX());
+   }
+
+   public HandlerRegistration addSelectionHandler(
+         SelectionHandler<FileSystemItem> handler)
+   {
+      return addHandler(handler, SelectionEvent.getType());
+   }
+
+   public HandlerRegistration addSelectionCommitHandler(
+         SelectionCommitEvent.Handler<FileSystemItem> handler)
+   {
+      return addHandler(handler, SelectionCommitEvent.getType());
+   }
+
+   public void addDirectory(FileSystemItem directory)
+   {
+      addItem(directory);
+      int rowNum = data_.size() - 1;
+      table_.setHorizontalScrollPosition(0);
+      table_.selectRow(rowNum, RowTable.ScrollType.DEFAULT);
+   }
+   
+   public void focus()
+   {
+      table_.setFocus(true);
+   }
+
+   public void setFocus(boolean focus)
+   {
+      table_.setFocus(focus);
+   }
+
+   @Override
+   protected void onDetach()
+   {
+      super.onDetach();
+      progressTimer_.cancel();
+      table_.getElement().getStyle().clearProperty("pointerEvents");
+   }
+
+
+   private final List<FileSystemItem> data_;
+   private final RowTable<FileSystemItem> table_;
+   private final SimplePanelWithProgress progressPanel_;
+
+   private final Timer progressTimer_ = new Timer()
+   {
+      @Override
+      public void run()
+      {
+         clearContents();
+         progressPanel_.showProgress(0);
+      }
+   };
+
+   private FileSystemItem parentDirectory_;
+
+   private static final int PROGRESS_DELAY_MS = 1000;
+   private static final CoreClientConstants constants_ = GWT.create(CoreClientConstants.class);
+}

@@ -1,0 +1,18 @@
+{
+  "private": true,
+  "scripts": {
+    "test:scripted-combined": "PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-console-roundtrip-scripted.test.ts tests/panes/rai-assistant/rai-console-decline-scripted.test.ts --workers=1",
+    "test:r-only-matrix": "PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-console-r-only-matrix-scripted.test.ts --workers=1",
+    "test:extended-session": "PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-console-extended-session-scripted.test.ts --workers=1",
+    "test:debug-info": "PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-console-debug-info-scripted.test.ts --workers=1",
+    "test:stage1-debugging-matrix": "PW_RSTUDIO_R_LIBS_SKIP_PREP=1 PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-console-stage1-debugging-matrix-scripted.test.ts --workers=1",
+    "test:safe-object-summary": "PW_RSTUDIO_R_LIBS_SKIP_PREP=1 PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-console-safe-object-summary-scripted.test.ts --workers=1",
+    "test:plot-image": "PW_RSTUDIO_R_LIBS_SKIP_PREP=1 PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-plot-image-scripted.test.ts --workers=1",
+    "test:viewer-state": "PW_RSTUDIO_R_LIBS_SKIP_PREP=1 PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-viewer-state-scripted.test.ts --workers=1",
+    "test:context-connectors": "PW_RSTUDIO_R_LIBS_SKIP_PREP=1 PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-context-connectors-scripted.test.ts tests/panes/rai-assistant/rai-context-connectors-no-project-scripted.test.ts --workers=1",
+    "test:auto-approve-readonly": "PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-auto-approve-readonly-scripted.test.ts --workers=1",
+    "test:editor-edit": "PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-editor-edit-scripted.test.ts --workers=1",
+    "test:comprehensive-context": "PW_RSTUDIO_R_LIBS_SKIP_PREP=1 PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-comprehensive-context-scripted.test.ts --workers=1",
+    "test:restart-recovery": "PW_RSTUDIO_R_LIBS_SKIP_PREP=1 PW_RSTUDIO_PATH=/Applications/RAI-Studio.app/Contents/MacOS/RAI-Studio PW_SANDBOX_NO_SEED_CREDENTIALS=1 npm --prefix ../../.. run test:desktop -- tests/panes/rai-assistant/rai-restart-recovery-scripted.test.ts --workers=1"
+  }
+}

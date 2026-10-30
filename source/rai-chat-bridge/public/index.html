@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAI Assistant</title>
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <link rel="stylesheet" href="/terminal.css">
+</head>
+<body>
+  <div id="term-shell">
+    <button id="settings-gear" type="button" hidden title="Settings" aria-label="Settings">⚙</button>
+    <button id="restart-pending" type="button" hidden title="Saved settings pending an explicit Assistant restart">Restart Assistant</button>
+    <div id="settings-panel" role="dialog" aria-label="Assistant settings" hidden>
+      <div class="settings-tabs" role="tablist" aria-label="Assistant settings">
+        <button id="settings-tab-general" role="tab" aria-controls="settings-general" aria-selected="true" type="button">General</button>
+        <button id="settings-tab-global" role="tab" aria-controls="settings-global" aria-selected="false" type="button">Global</button>
+        <button id="settings-tab-snippets" role="tab" aria-controls="settings-snippets" aria-selected="false" type="button">Snippets</button>
+      </div>
+      <div id="settings-general" role="tabpanel" aria-labelledby="settings-tab-general">
+        <div class="settings-theme-control">
+          <span>Provider</span>
+          <div id="settings-provider-list" role="group" aria-label="Provider"></div>
+        </div>
+        <input id="settings-provider" type="hidden" value="">
+        <div id="settings-provider-status" role="status">Checking sign-in…</div>
+        <div id="settings-provider-actions">
+          <button id="settings-sign-in-provider" type="button">Sign in</button>
+          <button id="settings-test-provider" type="button">Check sign-in</button>
+        </div>
+        <div class="settings-appearance">
+          <div class="settings-theme-control">
+            <span>Theme</span>
+            <div class="settings-theme-toggle" role="group" aria-label="Theme">
+              <button id="settings-theme-dark" type="button" data-theme="dark">Black</button>
+              <button id="settings-theme-light" type="button" data-theme="light">White</button>
+            </div>
+          </div>
+          <div class="settings-theme-control">
+            <span>Font size</span>
+            <div class="settings-theme-toggle settings-fontsize-toggle" role="group" aria-label="Font size">
+              <button id="settings-fontsize-10" type="button" data-font-size="10">Small</button>
+              <button id="settings-fontsize-12" type="button" data-font-size="12">Medium</button>
+              <button id="settings-fontsize-14" type="button" data-font-size="14">Large</button>
+            </div>
+            <input id="settings-fontsize" type="hidden" value="10">
+          </div>
+        </div>
+        <label class="settings-approval"><input id="settings-caffeinate" type="checkbox"> Keep Mac awake</label>
+        <p id="settings-rai-policy-hint" class="settings-hint">Valid RAI tool actions are approved automatically. Native CLI permissions remain unchanged.</p>
+      </div>
+      <div id="settings-global" role="tabpanel" aria-labelledby="settings-tab-global" hidden>
+        <label for="settings-global-prompt">Global instructions</label>
+        <textarea id="settings-global-prompt" rows="10" spellcheck="false" placeholder="Conventions, review style, preferred skills" aria-describedby="settings-global-hint"></textarea>
+        <p id="settings-global-hint" class="settings-hint">Optional, up to 16 KB. Cannot override CLI permissions. Save stores changes; use Restart Assistant when idle to apply.</p>
+      </div>
+      <div id="settings-snippets" role="tabpanel" aria-labelledby="settings-tab-snippets" hidden>
+        <p class="settings-hint">Click inserts the text. Nothing is sent until you press Enter.</p>
+        <div id="settings-skill-status" role="status" class="settings-hint"></div>
+        <div class="snippet-top-actions">
+          <button id="settings-add-snippet" type="button" aria-label="Add snippet" title="Add snippet">+</button>
+          <button id="snippet-delete" type="button" aria-label="Delete selected snippet" title="Delete selected snippet">−</button>
+          <div id="snippet-count" role="status"></div>
+        </div>
+        <div id="snippet-list" role="listbox" aria-label="Saved snippets" aria-describedby="snippet-list-help"></div>
+        <p id="snippet-list-help" class="settings-hint">Arrow keys select; Move up and Move down reorder.</p>
+
+        <div id="snippet-editor" hidden>
+          <label for="snippet-edit-name">Name</label>
+          <input id="snippet-edit-name" type="text" maxlength="48" autocomplete="off" placeholder="Shown on the button">
+          <label for="snippet-edit-prompt">Prompt</label>
+          <textarea id="snippet-edit-prompt" rows="7" spellcheck="false" placeholder="One line, up to 300 characters" aria-describedby="snippet-prompt-count" wrap="soft"></textarea>
+          <p id="snippet-prompt-count" role="status" aria-live="polite" class="settings-hint"></p>
+          <div class="snippet-edit-actions">
+            <button id="snippet-move-up" type="button">Move up</button><button id="snippet-move-down" type="button">Move down</button>
+          </div>
+        </div>
+        <button id="settings-reset-snippets" type="button">Reset defaults</button>
+      </div>
+      <div id="settings-error" role="alert" hidden></div>
+      <div id="settings-close-confirm" role="alertdialog" aria-label="Unsaved settings" hidden>
+        Unsaved changes. Save, discard, or continue editing?
+        <button id="settings-confirm-save" type="button">Save</button>
+        <button id="settings-confirm-discard" type="button">Discard</button>
+        <button id="settings-confirm-continue" type="button">Continue editing</button>
+      </div>
+      <div id="settings-actions">
+        <button id="settings-save" type="button">Save changes</button>
+        <button id="settings-cancel" type="button">Cancel</button>
+      </div>
+    </div>
+    <section id="run-inspector" aria-live="polite" hidden>
+      <div id="run-inspector-summary"></div>
+      <div id="run-inspector-safety" hidden></div>
+    </section>
+    <div id="scoped-guidance" role="group" aria-label="Scoped reviews">
+      <div id="scoped-shortcuts"></div>
+
+      <span id="scoped-guidance-status" role="status" aria-live="polite" aria-atomic="true">Draft only; review and press Enter to send.</span>
+    </div>
+    <div id="pending-draft" hidden>
+      <label for="pending-draft-text">Queued draft · Not sent · inserts automatically when the assistant is ready</label>
+      <textarea id="pending-draft-text" rows="3" spellcheck="false"></textarea>
+      <button id="pending-undo" type="button">Undo staging</button>
+      <button id="pending-clear" type="button">Clear</button>
+    </div>
+    <div id="term"></div>
+    <div id="term-status" role="status" aria-live="polite" hidden></div>
+  </div>
+  <script>window.__RAI_WS_SESSION_TOKEN__ = __RAI_WS_SESSION_TOKEN_VALUE__; window.__RAI_PARENT_ORIGIN__ = __RAI_PARENT_ORIGIN_VALUE__;</script>
+  <script src="/vendor/xterm.js"></script>
+  <script src="/vendor/addon-fit.js"></script>
+  <script src="/vendor/addon-webgl.js"></script>
+  <script src="/vendor/addon-image.js"></script>
+  <script type="module" src="/terminal.js"></script>
+</body>
+</html>

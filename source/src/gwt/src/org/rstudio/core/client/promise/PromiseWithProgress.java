@@ -1,0 +1,96 @@
+/*
+ * PromiseWithProgress.java
+ *
+ * Copyright (C) 2022 by Posit Software, PBC
+ *
+ * Unless you have received this program directly from Posit Software pursuant
+ * to the terms of a commercial license agreement with Posit Software, then
+ * this program is licensed to you under the terms of version 3 of the
+ * GNU Affero General Public License. This program is distributed WITHOUT
+ * ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING THOSE OF NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Please refer to the
+ * AGPL (http://www.gnu.org/licenses/agpl-3.0.txt) for more details.
+ *
+ */
+
+package org.rstudio.core.client.promise;
+
+import com.google.gwt.core.client.GWT;
+import com.google.gwt.user.client.Command;
+
+import org.rstudio.core.client.CoreClientConstants;
+import org.rstudio.core.client.CommandWithArg;
+import org.rstudio.core.client.Debug;
+import org.rstudio.studio.client.RStudioGinjector;
+import org.rstudio.studio.client.common.GlobalDisplay;
+import org.rstudio.studio.client.common.GlobalProgressDelayer;
+
+import elemental2.promise.IThenable;
+import elemental2.promise.Promise;
+import elemental2.promise.IThenable.ThenOnFulfilledCallbackFn;
+import elemental2.promise.IThenable.ThenOnRejectedCallbackFn;
+
+
+public class PromiseWithProgress<V>
+{ 
+   public PromiseWithProgress(Promise<V> promise, V errorVal, int delayMs, CommandWithArg<V> completed)
+   {
+      this(promise, constants_.promiseWithProgress(), errorVal, delayMs, completed);
+   }
+   
+   public PromiseWithProgress(Promise<V> promise, String progress, V errorVal, int delayMs, CommandWithArg<V> completed)
+   {
+      // setup progress
+      GlobalDisplay globalDisplay = RStudioGinjector.INSTANCE.getGlobalDisplay();
+      GlobalProgressDelayer progressDelayer = delayMs > 0
+         ? new GlobalProgressDelayer(globalDisplay, delayMs, progress)
+         : null;
+      
+      // execute the promise
+      promise.then(new ThenOnFulfilledCallbackFn<V,V>() {
+         @Override
+         public IThenable<V> onInvoke(V v)
+         {
+            if (progressDelayer != null)
+               progressDelayer.dismiss();
+            reportingExceptions(() -> completed.execute(v));
+            return null;
+
+         }
+      },new ThenOnRejectedCallbackFn<V>() {
+
+         @Override
+         public IThenable<V> onInvoke(Object error)
+         {
+            if (progressDelayer != null)
+               progressDelayer.dismiss();
+            globalDisplay.showErrorMessage(constants_.promiseWithProgressError(), String.valueOf(error));
+            reportingExceptions(() -> completed.execute(errorVal));
+            return null;
+         }
+      });
+   }
+
+   // These callbacks run from a native promise continuation, which GWT does
+   // not wrap with $entry: an exception thrown here would become an unhandled
+   // promise rejection, invisible to the uncaught-exception handler. That can
+   // leave callers waiting forever with no diagnostic (see rstudio/rstudio#18134),
+   // so catch and route to the uncaught handler explicitly.
+   private void reportingExceptions(Command command)
+   {
+      try
+      {
+         command.execute();
+      }
+      catch (Exception e)
+      {
+         Debug.logException(e);
+
+         GWT.UncaughtExceptionHandler handler = GWT.getUncaughtExceptionHandler();
+         if (handler != null)
+            handler.onUncaughtException(e);
+      }
+   }
+
+   private static final CoreClientConstants constants_ = GWT.create(CoreClientConstants.class);
+}

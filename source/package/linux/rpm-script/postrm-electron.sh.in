@@ -1,0 +1,32 @@
+#!/bin/sh
+
+# errors shouldn't cause script to exit
+set +e 
+
+# only remove things if this is an uninstall
+if [ "$1" = 0 ]
+then
+   # remove softlink to rstudio
+   rm -f /usr/bin/rstudio
+
+   # remove openssl softlinks
+   rm -f ${CMAKE_INSTALL_PREFIX}/bin/libssl.so.1.0.0
+   rm -f ${CMAKE_INSTALL_PREFIX}/bin/libcrypto.so.1.0.0
+fi
+
+# note: Yaru icon theme symlink workaround is DEB-only (Ubuntu-specific)
+
+# refresh mime database and icon cache
+if command -v update-mime-database > /dev/null; then
+   if ! update-mime-database /usr/share/mime > /dev/null; then
+      echo "rstudio postrm: warning: update-mime-database failed" >&2
+   fi
+fi
+if command -v gtk-update-icon-cache > /dev/null; then
+   if ! gtk-update-icon-cache -f -t /usr/share/icons/hicolor > /dev/null; then
+      echo "rstudio postrm: warning: gtk-update-icon-cache failed for hicolor" >&2
+   fi
+fi
+
+# clear error termination state
+set -e

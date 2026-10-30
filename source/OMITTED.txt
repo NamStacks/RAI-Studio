@@ -1,0 +1,22 @@
+Paths left out of this source release. None is needed to build the app.
+They are internal planning and handoff notes, release scripts for older versions, tool settings for the upstream developers, and CI files that name another repository.
+
+.claude/
+.github/
+RAI-STUDIO-HANDOFF.md
+RAI-STUDIO-MACOS-INSTALL.md
+docs/UPDATES.md
+docs/plans/
+docs/rai-assistant-video-inspection-2026-07-10.md
+package/osx/RAI-Studio-0.1.55-bridge-manifest.txt
+package/osx/RAI-Studio-0.1.55-provenance.md
+package/osx/release-v0.1.40.sh
+package/osx/release-v0.1.41.sh
+package/osx/release-v0.1.42.sh
+package/osx/release-v0.1.43.sh
+package/osx/release-v0.1.44.sh
+package/osx/release-v0.1.53.sh
+package/osx/release-v0.1.54.sh
+release/
+
+Not included: rai-chat-bridge/node_modules (install from rai-chat-bridge/package-lock.json) and the build outputs and downloaded dependencies the build creates.
